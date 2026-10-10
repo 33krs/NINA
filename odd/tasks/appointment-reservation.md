@@ -1,6 +1,6 @@
 # Appointment Reservation — Step 5
 
-Implemented exact-slot reservations originally on `fix/eslint9-and-git-workflow`; active local slice branch is `feature/appointments-01-contract`. Historical full-candidate checks, separate local Redis/PostgreSQL acceptance, and the cleanup correction passed. Slice preparation is verified below; each exact staged intermediate tree and S1–S4 commits remain pending parent. No remote operation or native lifecycle command was run.
+Four local functional slices are committed and independently verified on the appointment feature chain. Root lint/build, 80 API tests, and two actual Redis/PostgreSQL acceptance cases passed. Native review remains pending unavailable selection capture; no push, PR, merge, or approval is claimed.
 
 ## Objective and scope
 Reserve an exact professional/time slot safely before PostgreSQL persistence, following RAYEN_AUTONOMOUS_PLAN.md:279–281.
@@ -24,8 +24,8 @@ Reserve an exact professional/time slot safely before PostgreSQL persistence, fo
 - User direction: respect the approximately 400-line budget as far as possible; no Step 5 size exception is granted.
 - One read-only slicing pass proposes four behavior/test/documentation units: validated request contract (278–348 authored lines), ownership-safe Redis provider (215–267), complete reservation endpoint (401–409), and live acceptance with isolated cleanup (294–314). Estimates include scaffolding and documentation churn, exclude generated lockfile, and are not measured rewritten diffs or intermediate verification.
 - Chain branches: feature/appointments (tracker at dbb59da), feature/appointments-01-contract, feature/appointments-02-locking, feature/appointments-03-reservation, feature/appointments-04-acceptance. Each child depends on its immediate predecessor. Preserve request-path safety assertions; measure each real commit diff before delivery.
-- Active branch: `feature/appointments-01-contract`; tracker base and first boundary: `dbb59da`. Original implementation branch: `fix/eslint9-and-git-workflow`.
-- Step 5 commit: pending parent; nothing staged or committed by this writer.
+- Active branch: `feature/appointments-04-acceptance`; tracker remains at `dbb59da`, without merging into default/original branches. Original implementation branch: `fix/eslint9-and-git-workflow`.
+- Step 5 functional commits: ccad10b, ddbd97f, 7e22883, cdd2d68. Historical writer handoffs did not stage/commit; parent created these after exact-tree verification.
 - S1 exact-tree verification: c0416e236000d512d17511258a8f7dbfc45b4b43 exported independently; API lint/build passed, 35 tests passed (3 suites); parent repeated tests successfully. Shared installed dependencies, not clean-install proof. Commit pending; future endpoint/provider files excluded from this evidence.
 - S2 exact-tree verification: 07771c1ca3f018f6ef45410785b3b8eea1fbdd3e independently exported; API lint/build and 46 tests (4 suites) passed, parent repeated tests. Only DTO/provider suites present; installed Redis 6.3.0 matches manifest/lock, no clean-install/live proof. Commit pending.
 - S3 exact-tree verification: 2e7447cb644d057bb28427e84fea548301ccb03a exported independently; API lint/build and 68 tests (5 suites) passed, parent repeated tests with authorized local sockets. Endpoint HTTP suite present, live suite absent; no clean-install/live-service proof. Commit pending.
@@ -35,9 +35,9 @@ Reserve an exact professional/time slot safely before PostgreSQL persistence, fo
 - [x] S1 Contract committed as ccad10b: 274 authored lines; exact-tree API lint/build and 35 tests passed. Native review handoff unavailable (required external selection capture absent); no approval claimed.
 - [x] S2 Locking committed as ddbd97f: 273 authored / 359 raw lines; exact-tree API lint/build and 46 tests passed. Native review selection handoff unavailable; no approval claimed.
 - [x] S3 Reservation committed as 7e22883: 388 authored/raw lines; exact-tree API lint/build and 68 tests passed, preserving all request-path safety assertions. Native review handoff unavailable; no approval claimed.
-- [ ] S4 Commit live acceptance and isolated cleanup; run full and real-service checks.
+- [x] S4 Acceptance committed as cdd2d68: 267 authored/raw lines; root lint/build, 80 tests and 14 opt-in cases passed (12 cleanup regressions, 2 actual-service tests). Native review handoff unavailable; no approval claimed.
 - [x] T5.1 Implement exact-slot reservation and Redis ownership-safe locking with deterministic tests.
-- [ ] T5.2 Verify concurrency over HTTP and actual available local services; reconcile records and commit. Worker verification/reconciliation and cleanup correction are complete; parent correction spot check, delivery decision, and commit remain pending.
+- [x] T5.2 Functional verification, reconciliation and local chain commits complete, including parent spot checks and actual-service concurrency. Native review remains separately pending and does not have an approval receipt.
 
 ## Implementation and limits
 | Topic | Behavior / limitation |
@@ -145,14 +145,24 @@ The first Prisma invocation used an incorrect root CLI path and returned 127; re
 - [x] Patient existence validation; unchanged schema and documented integrity limits.
 - [x] Existing health route available; patient/family modules remain registered and their six tests pass.
 - [x] Step 4 commit `dbb59da` reconciled; ESLint T4 marked committed; prior review pending unavailable collection, no push.
-- [ ] Parent exact intermediate-tree checks and S1–S4 commits. Correction spot check passed and local-only chain choice is resolved; any review remains a separate parent authorization. PRIOR independent verification is recorded above.
+- [x] Parent exact intermediate-tree checks and S1–S4 functional commits; each slice is below 400 authored lines, with tests/docs kept alongside behavior.
+- [ ] Native review: cumulative assessment is medium, due for slice_budget_reached. Canonical STATUS requires external.select_intended_untracked, absent from this runtime; no START, candidate consent, reviewer result, acknowledgement, or receipt. Unrelated local .atl/.codegraph files remain excluded per user choice; no JSON payload was invented.
 
 ## Changed paths and size
 - New `apps/api/src/modules/appointments/{appointment-lock.service,appointment-lock.service.spec,appointments.controller,appointments.service,appointments.module,reserve-appointment.dto,reserve-appointment.dto.spec,appointments.http.spec,appointments.live.spec}.ts`.
 - Updated `apps/api/src/app.module.ts`, `apps/api/package.json`, `package-lock.json`, `odd/tasks/appointment-reservation.md`, `odd/tasks/clinical-module-base.md`, `odd/tasks/eslint9-workflow.md`.
 - Historical authored whole candidate count before slice preparation: 907 additions + deletions, excluding `package-lock.json`, generated files, `.atl/`, and `.codegraph/`; computed from tracked worktree diffs plus the original seven untracked appointment files and this entire task document. Source/tests/manifest: 775; documentation: 132 (then recorded as 120 lines here). No files were staged or committed. This exceeded the 400-line heuristic; the user subsequently selected the local chain, not a whole-candidate exception.
-- Prepared boundaries now total 1192 authored additions + deletions: S1 273, S2 270, S3 385, S4 264; source/tests/manifest 1026, documentation 166. Generated lockfile adds 86 lines excluded from that budget. Later per-slice tracker updates are pending and must be added to each exact staged diff.
+- Historical prepared boundaries totaled 1192 authored additions + deletions before verification records: S1 273, S2 270, S3 385, S4 264. Four functional commits actually total 1202 authored lines: S1 274, S2 273, S3 388, S4 267. Generated lockfile adds 86 lines, so raw commit churn is 1288. A separate passive closure-document commit records the last commit identity and final state; count its diff within the S4 delivery boundary.
 - Rollback boundary: the new appointments subtree, AppModule import/registration, Redis manifest/lock additions, and this Step 5 document; prior task-record reconciliations describe existing history and need not be reverted.
 
+## Final local chain boundaries
+| Slice | Parent | Commit | Authored / raw lines | Cumulative test proof |
+| --- | --- | --- | --- | --- |
+| S1 Contract | dbb59da | ccad10b | 274 / 274 | API lint/build, 35 tests |
+| S2 Redis locking | ccad10b | ddbd97f | 273 / 359 | API lint/build, 46 tests |
+| S3 Reservation | ddbd97f | 7e22883 | 388 / 388 | API lint/build, 68 tests |
+| S4 Acceptance | 7e22883 | cdd2d68 + closure docs | 295 / 295 including passive closure | Root lint/build, 80 tests, 14 opt-in cases |
+Closure documentation changes do not mutate verified source. Independent exports share installed dependencies, so clean-install reproduction is not claimed. Functional snapshot checks are separate from native review, never substitute reviewer evidence.
+
 ## Next step
-Historical parent cleanup spot check passed: `npm run test --workspace=@nina/api -- --runInBand appointments.live.spec.ts -t cleanup` (12 passed, 2 live skipped); `git diff --check` passed. Next: parent stages S1 on active branch01, independently verifies its exact staged tree, then commits and advances the local chain. Measure future tracker churn per slice; handle any review separately. No remote operation is authorized.
+Resolve the unavailable native selection capture before claiming review closure. The next documented feature is Step 6 encounter recording, a separate implementation unit. Keep the local chain unmerged/unpublished unless the user explicitly authorizes delivery. Production failover, signal shutdown, real lease-overrun, and clean-install checks remain untested as documented above.
