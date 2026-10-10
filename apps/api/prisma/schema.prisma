@@ -39,6 +39,8 @@ model Encounter {
   id             String          @id @default(uuid())
   patientId      String
   patient        Patient         @relation(fields: [patientId], references: [id])
+  appointmentId  String?
+  appointment    Appointment?    @relation(fields: [appointmentId], references: [id], onDelete: SetNull)
   professionalId String
   date           DateTime
   status         EncounterStatus
@@ -46,6 +48,8 @@ model Encounter {
   soapObjective  String?
   soapAssessment String?
   soapPlan       String?
+
+  @@index([appointmentId])
 }
 
 enum EncounterStatus {
@@ -78,6 +82,7 @@ model Appointment {
   startTime      DateTime
   endTime        DateTime
   status         AppointmentStatus
+  encounters     Encounter[]
 
   @@unique([professionalId, startTime, endTime])
 }
