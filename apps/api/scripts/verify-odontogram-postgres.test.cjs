@@ -16,11 +16,13 @@ const {
   subprocessEnvironment,
 } = require('./verify-odontogram-postgres.cjs');
 
-function fakeDockerSource(root, blockedPhase) {
+function fakeDockerSource(root, blockedPhase, options = {}) {
   return `#!${process.execPath}
 const fs = require('node:fs');
 const path = require('node:path');
+const { spawn } = require('node:child_process');
 const root = ${JSON.stringify(root)};
+const options = ${JSON.stringify(options)};
 const args = process.argv.slice(4);
 const file = (name) => path.join(root, name);
 fs.appendFileSync(file('calls'), JSON.stringify(process.argv.slice(2)) + '\\n');
@@ -28,7 +30,21 @@ const labels = () => Object.fromEntries(args.flatMap((arg, i) =>
   arg === '--label' ? [args[i + 1].split('=')] : []));
 const block = () => {
   process.on('SIGTERM', () => {});
-  fs.writeFileSync(file('active'), JSON.stringify({ pid: process.pid, home: process.env.HOME }));
+  const ready = (descendantPid) => fs.writeFileSync(file('active'), JSON.stringify({
+    pid: process.pid, home: process.env.HOME, descendantPid
+  }));
+  if (options.descendant) {
+    // Inherit the owned command's process group; do not detach the descendant.
+    const descendant = spawn(process.execPath, ['-e',
+      'setInterval(() => {}, 1000); process.send("ready");'
+    ], { stdio: ['ignore', 'inherit', 'inherit', 'ipc'] });
+    fs.writeFileSync(file('command-started'), JSON.stringify({
+      pid: process.pid, home: process.env.HOME, descendantPid: descendant.pid
+    }));
+    descendant.once('message', () => ready(descendant.pid));
+    descendant.once('exit', (code, signal) =>
+      fs.writeFileSync(file('descendant-exit'), JSON.stringify({ code, signal })));
+  } else ready();
   setTimeout(() => {
     fs.writeFileSync(file('continued'), 'unexpected later phase');
     process.exit(0);
@@ -47,7 +63,12 @@ else if (args[0] === 'network' && args[1] === 'create') {
   }));
   if (${JSON.stringify(blockedPhase)} === 'create') block();
   else console.log('owned-container');
-} else if (args[0] === 'start') block();
+} else if (args[0] === 'start') {
+  if (options.cleanup) {
+    console.error('expected start failure');
+    process.exitCode = 7;
+  } else block();
+}
 else if (args[0] === 'inspect' || (args[0] === 'network' && args[1] === 'inspect')) {
   const kind = args[0] === 'inspect' ? 'container' : 'network';
   const target = args.at(-1);
@@ -65,7 +86,14 @@ else if (args[0] === 'inspect' || (args[0] === 'network' && args[1] === 'inspect
   const kind = args[0] === 'rm' ? 'container' : 'network';
   const resource = JSON.parse(fs.readFileSync(file(kind), 'utf8'));
   if (args.at(-1) !== resource.Id) throw new Error('unexpected removal target');
-  fs.unlinkSync(file(kind));
+  if (kind === 'container' && options.cleanup) {
+    fs.writeFileSync(file('cleanup-active'), JSON.stringify({ pid: process.pid, home: process.env.HOME }));
+    const timer = setInterval(() => {
+      if (!fs.existsSync(file('release-cleanup'))) return;
+      clearInterval(timer);
+      fs.unlinkSync(file(kind));
+    }, 10);
+  } else fs.unlinkSync(file(kind));
 } else throw new Error('unexpected later phase: ' + args.join(' '));
 `;
 }
@@ -78,21 +106,43 @@ async function waitUntil(predicate, message, timeoutMs = 2500) {
   }
 }
 
-for (const [signal, phase, exitCode] of [
+for (const [signal, phase, exitCode, options = {}] of [
   ['SIGINT', 'start', 130],
   ['SIGTERM', 'create', 143],
+  ['SIGINT', 'start', 130, { descendant: true }],
+  ['SIGTERM', 'start', 143, { descendant: true }],
+  ['SIGINT', 'start', 130, { cleanup: true }],
+  ['SIGTERM', 'start', 143, { cleanup: true }],
 ]) {
-  test(`real ${signal} interrupts an active ${phase} child and cleans only owned resources`, async () => {
+  const scenario = options.cleanup
+    ? 'during cleanup preserves resource removal'
+    : options.descendant
+      ? 'terminates an owned command and its descendant'
+      : `interrupts an active ${phase} child`;
+  test(`real ${signal} ${scenario} and cleans only owned resources`, async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-signal-test-'));
     const fakeDocker = path.join(root, 'docker');
-    fs.writeFileSync(fakeDocker, fakeDockerSource(root, phase), {
+    fs.writeFileSync(fakeDocker, fakeDockerSource(root, phase, options), {
       mode: 0o700,
     });
     fs.writeFileSync(path.join(root, 'foreign-container'), 'untouched');
     fs.writeFileSync(path.join(root, 'foreign-network'), 'untouched');
+    const observer = path.join(root, 'signal-observer.cjs');
+    if (options.cleanup) {
+      // Observe delivery after all signal listeners ran; never drive cancellation.
+      fs.writeFileSync(
+        observer,
+        `process.once(${JSON.stringify(signal)}, () => setImmediate(() => {
+          require('node:fs').writeFileSync(${JSON.stringify(path.join(root, 'signal-received'))}, 'received');
+        }));`,
+      );
+    }
     const child = spawn(
       process.execPath,
-      [path.join(__dirname, 'verify-odontogram-postgres.cjs')],
+      [
+        ...(options.cleanup ? ['--require', observer] : []),
+        path.join(__dirname, 'verify-odontogram-postgres.cjs'),
+      ],
       {
         env: { PATH: root, HOME: root },
       },
@@ -116,6 +166,10 @@ for (const [signal, phase, exitCode] of [
       }),
     );
     let active;
+    const activeFile = path.join(
+      root,
+      options.cleanup ? 'cleanup-active' : 'active',
+    );
     try {
       await waitUntil(() => {
         if (launchError) throw launchError;
@@ -124,11 +178,25 @@ for (const [signal, phase, exitCode] of [
           undefined,
           `runner exited before active child: ${output}`,
         );
-        return fs.existsSync(path.join(root, 'active'));
+        return fs.existsSync(activeFile);
       }, 'child command did not become active');
-      active = JSON.parse(fs.readFileSync(path.join(root, 'active'), 'utf8'));
+      active = JSON.parse(fs.readFileSync(activeFile, 'utf8'));
+      if (options.descendant) {
+        assert.ok(Number.isInteger(active.descendantPid));
+        process.kill(active.descendantPid, 0);
+      }
       const requestedAt = Date.now();
       assert.equal(child.kill(signal), true);
+      if (options.cleanup) {
+        await waitUntil(() => {
+          assert.equal(result, undefined, `runner aborted cleanup: ${output}`);
+          return fs.existsSync(path.join(root, 'signal-received'));
+        }, 'runner did not receive the signal during blocked cleanup');
+        process.kill(active.pid, 0);
+        assert.equal(fs.existsSync(path.join(root, 'container')), true);
+        assert.equal(fs.existsSync(path.join(root, 'network')), true);
+        fs.writeFileSync(path.join(root, 'release-cleanup'), 'release');
+      }
       await waitUntil(
         () => result,
         'runner did not promptly cancel the active child',
@@ -136,10 +204,30 @@ for (const [signal, phase, exitCode] of [
       assert.ok(Date.now() - requestedAt < 2500);
       assert.deepEqual(result, { code: exitCode, signal: null });
       assert.throws(() => process.kill(active.pid, 0), { code: 'ESRCH' });
+      if (options.descendant) {
+        await waitUntil(() => {
+          try {
+            process.kill(active.descendantPid, 0);
+            return false;
+          } catch (error) {
+            if (error.code !== 'ESRCH') throw error;
+            return true;
+          }
+        }, 'owned command descendant survived cancellation');
+        assert.deepEqual(
+          JSON.parse(
+            fs.readFileSync(path.join(root, 'descendant-exit'), 'utf8'),
+          ),
+          { code: null, signal: 'SIGTERM' },
+        );
+      }
       assert.match(
         output,
-        /PG15_SUITE_FAILED PostgreSQL verification cancelled by signal/,
+        options.cleanup
+          ? /PG15_SUITE_FAILED docker exited 7: expected start failure/
+          : /PG15_SUITE_FAILED PostgreSQL verification cancelled by signal/,
       );
+      assert.doesNotMatch(output, /CLEANUP_FAILED|PG15_SUITE_PASSED/);
       assert.match(
         output,
         /CLEANUP_ASSERTED container_id=owned-container .*network_id=owned-network/,
@@ -171,6 +259,7 @@ for (const [signal, phase, exitCode] of [
       );
       const commands = calls.map((args) => args.slice(2));
       const activeIndex = commands.findIndex((args) => args[0] === phase);
+      assert.ok(activeIndex >= 0, 'expected active phase must have run');
       assert.ok(
         commands
           .slice(activeIndex + 1)
@@ -178,7 +267,7 @@ for (const [signal, phase, exitCode] of [
             (args) =>
               args[0] === 'inspect' ||
               args[0] === 'rm' ||
-              args[0] === 'network',
+              (args[0] === 'network' && ['inspect', 'rm'].includes(args[1])),
           ),
       );
       assert.deepEqual(
@@ -188,18 +277,51 @@ for (const [signal, phase, exitCode] of [
           ['network', 'rm', 'owned-network'],
         ],
       );
-    } finally {
-      if (!result) child.kill('SIGKILL');
-      if (active && !result) {
-        try {
-          process.kill(active.pid, 'SIGKILL');
-        } catch (error) {
-          if (error.code !== 'ESRCH') throw error;
-        }
+      for (const [inspection, removal] of [
+        [
+          ['inspect', 'owned-container'],
+          ['rm', '--force', 'owned-container'],
+        ],
+        [
+          ['network', 'inspect', 'owned-network'],
+          ['network', 'rm', 'owned-network'],
+        ],
+      ]) {
+        const removalIndex = commands.findIndex(
+          (args) => JSON.stringify(args) === JSON.stringify(removal),
+        );
+        assert.deepEqual(commands[removalIndex - 1], inspection);
+        assert.deepEqual(commands[removalIndex + 1], inspection);
       }
-      await closed;
-      if (active) fs.rmSync(active.home, { recursive: true, force: true });
-      fs.rmSync(root, { recursive: true, force: true });
+    } finally {
+      try {
+        for (const candidate of [
+          activeFile,
+          path.join(root, 'command-started'),
+        ]) {
+          if (!active && fs.existsSync(candidate)) {
+            active = JSON.parse(fs.readFileSync(candidate, 'utf8'));
+          }
+        }
+        if (!result) child.kill('SIGKILL');
+        for (const pid of active
+          ? [-active.pid, active.descendantPid].filter(Number.isInteger)
+          : []) {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch (error) {
+            if (error.code !== 'ESRCH') throw error;
+          }
+        }
+        await waitUntil(
+          () => result,
+          'fixture runner did not close after teardown',
+        );
+        await closed;
+      } finally {
+        if (active) fs.rmSync(active.home, { recursive: true, force: true });
+        fs.rmSync(root, { recursive: true, force: true });
+      }
     }
   });
 }
