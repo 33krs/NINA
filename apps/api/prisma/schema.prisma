@@ -64,11 +64,24 @@ enum EncounterStatus {
 // ==========================================
 
 model Odontogram {
-  id          String   @id @default(uuid())
-  patientId   String   @unique
-  patient     Patient  @relation(fields: [patientId], references: [id])
+  id          String               @id @default(uuid())
+  patientId   String               @unique
+  patient     Patient              @relation(fields: [patientId], references: [id])
   teethStates Json
-  updatedAt   DateTime @updatedAt
+  version     Int                  @default(0)
+  revisions   OdontogramRevision[]
+  updatedAt   DateTime             @updatedAt
+}
+
+model OdontogramRevision {
+  id           String     @id @default(uuid())
+  odontogramId String
+  odontogram   Odontogram @relation(fields: [odontogramId], references: [id], onDelete: Restrict)
+  version      Int
+  teethStates  Json
+  createdAt    DateTime   @default(now())
+
+  @@unique([odontogramId, version])
 }
 
 // ==========================================
