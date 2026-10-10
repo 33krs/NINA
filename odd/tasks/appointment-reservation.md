@@ -161,7 +161,7 @@ The first Prisma invocation used an incorrect root CLI path and returned 127; re
 | S1 Contract | dbb59da | ccad10b | 274 / 274 | API lint/build, 35 tests |
 | S2 Redis locking | ccad10b | ddbd97f | 273 / 359 | API lint/build, 46 tests |
 | S3 Reservation | ddbd97f | 7e22883 | 388 / 388 | API lint/build, 68 tests |
-| S4 Acceptance | 7e22883 | cdd2d68 + closure docs | 295 / 295 including passive closure | Root lint/build, 80 tests, 14 opt-in cases |
+| S4 Acceptance | 7e22883 | cdd2d68 + closure docs | 293 / 293 measured delivery diff including passive closure | Root lint/build, 80 tests, 14 opt-in cases |
 Closure documentation changes do not mutate verified source. Independent exports share installed dependencies, so clean-install reproduction is not claimed. Functional snapshot checks are separate from native review, never substitute reviewer evidence.
 
 ## Next step
