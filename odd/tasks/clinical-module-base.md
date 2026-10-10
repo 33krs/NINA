@@ -43,8 +43,8 @@ Implement the first NestJS clinical vertical slice: PatientsModule and FamilyMod
 - Added Prisma lifecycle management, global DTO validation, patient/family CRUD endpoints, and mocked service tests.
 - Focused test-first evidence: tests initially failed because the services were absent; after implementation, all 6 focused tests passed.
 - Verification: `npm run build` passed; `npm run lint` passed; `npm run test --workspace=@nina/api -- --runInBand` passed (2 suites, 6 tests); `git diff --check` passed.
-- Commit: pending native review requirements; implementation will be recorded on `fix/eslint9-and-git-workflow`.
+- Commit: `dbb59da` (`feat(api): add patient and family modules with ESLint 9`) exists on `fix/eslint9-and-git-workflow`; checks above passed. Native review remains pending because collection was unavailable; no approval is claimed and nothing was pushed.
 - No unrelated Prisma models were changed; the existing `GET /` health route remains registered.
 
 ## Next Step
-Complete native review and commit the verified Step 4 and lint workflow changes.
+Parent: resolve the pending native review collection separately. Step 4 is already committed locally; no push is authorized.

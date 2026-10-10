@@ -22,7 +22,7 @@ Make the root lint command run real ESLint 9 checks across workspaces and establ
 - [x] T1 Add/repair ESLint 9 flat configuration and dependencies.
 - [x] T2 Wire workspace and root lint commands.
 - [x] T3 Run lint/build/tests and record outcomes.
-- [ ] T4 Commit the scoped feature changes with a Conventional Commit (deferred to parent; worker must not commit).
+- [x] T4 Commit the scoped feature changes with a Conventional Commit: `dbb59da`.
 
 ## Acceptance Criteria
 - `npm run lint` invokes ESLint and exits non-zero on lint violations.
@@ -33,14 +33,14 @@ Make the root lint command run real ESLint 9 checks across workspaces and establ
 ## Progress
 - Route: delegated direct for multi-file lint configuration; branch created inline first.
 - Branch: `fix/eslint9-and-git-workflow`.
-- Status: T1–T3 implemented and verified; this supporting lint fix will be included with the verified Step 4 work-unit commit under the user's one-time size exception.
+- Status: T1–T4 implemented, verified, and committed locally in `dbb59da` with Step 4 under the user's one-time size exception. Native review is pending unavailable collection; no push occurred.
 
 ## Implementation
 - Added one ESLint 9 flat config entry point per API, frontend, and UI workspace, each reusing `@nina/config-eslint`.
 - Made the shared preset's actual runtime imports explicit (`@eslint/js`, `eslint`, `eslint-config-prettier`, `@typescript-eslint/parser`, and `@typescript-eslint/eslint-plugin`) and retained the existing parser/plugin dependencies.
 - Updated API lint to target its existing `src/**/*.ts` tree and frontend lint to run ESLint directly because this Next.js 15 version does not provide the legacy `next lint` command.
 - Root `lint` remains `turbo lint`, which discovers and invokes each workspace's `lint` script; Turbo's `lint` task is present.
-- Preserved pre-existing Step 4 edits in the API manifest and lockfile; only changed the API lint script in its manifest. No commit was created.
+- Preserved pre-existing Step 4 edits in the API manifest and lockfile; only changed the API lint script in its manifest. The writer did not commit; the parent subsequently recorded the work in `dbb59da`.
 - Scoped readonly CommonJS globals to `apps/frontend/eslint.config.js` in its flat config, and replaced `React.ReactNode` with an explicit type-only `ReactNode` import.
 
 ## Verification status
@@ -50,4 +50,4 @@ Make the root lint command run real ESLint 9 checks across workspaces and establ
 - Runtime compatibility is confirmed by the passing root lint and build commands above.
 
 ## Next Step
-Parent: finish native review requirements, commit intended files, and record the commit identity.
+Parent: resolve unavailable native review collection separately. Local commit `dbb59da` already records T4; no push is authorized.
