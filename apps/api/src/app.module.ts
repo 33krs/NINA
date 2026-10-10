@@ -6,9 +6,16 @@ import { FamiliesModule } from './families/families.module';
 import { PatientsModule } from './patients/patients.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { AppointmentsModule } from './modules/appointments/appointments.module';
+import { EncountersModule } from './modules/encounters/encounters.module';
 
 @Module({
-  imports: [PrismaModule, PatientsModule, FamiliesModule, AppointmentsModule],
+  imports: [
+    PrismaModule,
+    PatientsModule,
+    FamiliesModule,
+    AppointmentsModule,
+    EncountersModule,
+  ],
   controllers: [AppController],
   providers: [
     AppService,
