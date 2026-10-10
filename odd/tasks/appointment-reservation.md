@@ -28,10 +28,11 @@ Reserve an exact professional/time slot safely before PostgreSQL persistence, fo
 - Step 5 commit: pending parent; nothing staged or committed by this writer.
 - S1 exact-tree verification: c0416e236000d512d17511258a8f7dbfc45b4b43 exported independently; API lint/build passed, 35 tests passed (3 suites); parent repeated tests successfully. Shared installed dependencies, not clean-install proof. Commit pending; future endpoint/provider files excluded from this evidence.
 - S2 exact-tree verification: 07771c1ca3f018f6ef45410785b3b8eea1fbdd3e independently exported; API lint/build and 46 tests (4 suites) passed, parent repeated tests. Only DTO/provider suites present; installed Redis 6.3.0 matches manifest/lock, no clean-install/live proof. Commit pending.
+- S3 exact-tree verification: 2e7447cb644d057bb28427e84fea548301ccb03a exported independently; API lint/build and 68 tests (5 suites) passed, parent repeated tests with authorized local sockets. Endpoint HTTP suite present, live suite absent; no clean-install/live-service proof. Commit pending.
 
 ## Tasks
 - [x] S1 Contract committed as ccad10b: 274 authored lines; exact-tree API lint/build and 35 tests passed. Native review handoff unavailable (required external selection capture absent); no approval claimed.
-- [ ] S2 Commit ownership-safe Redis provider with focused lifecycle/lease tests and manifest/lockfile.
+- [x] S2 Locking committed as ddbd97f: 273 authored / 359 raw lines; exact-tree API lint/build and 46 tests passed. Native review selection handoff unavailable; no approval claimed.
 - [ ] S3 Commit complete endpoint with request-path safety/concurrency tests and AppModule wiring.
 - [ ] S4 Commit live acceptance and isolated cleanup; run full and real-service checks.
 - [x] T5.1 Implement exact-slot reservation and Redis ownership-safe locking with deterministic tests.
