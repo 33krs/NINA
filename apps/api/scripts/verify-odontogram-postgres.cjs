@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawn } = require('node:child_process');
 
 const DOCKER_HOST = 'unix:///var/run/docker.sock';
 const OWNER_LABEL = 'nina.odontogram-postgres15.owner';
@@ -26,10 +26,14 @@ function timeoutFor(operation) {
 
 function createCancellation() {
   let exitCode;
+  const controller = new AbortController();
   return {
     request(signal) {
+      if (exitCode) return;
       exitCode = signal === 'SIGINT' ? 130 : 143;
+      controller.abort();
     },
+    signal: controller.signal,
     get exitCode() {
       return exitCode;
     },
@@ -40,9 +44,9 @@ function createCancellation() {
   };
 }
 
-function createPossiblyOwned(state, uncertainKey, create) {
+async function createPossiblyOwned(state, uncertainKey, create) {
   state[uncertainKey] = true;
-  const id = create();
+  const id = await create();
   state[uncertainKey] = false;
   return id;
 }
@@ -100,7 +104,7 @@ function validateIsolatedClient({ clientPath, tempRoot, schemaEnvPath }) {
   return true;
 }
 
-function reconcileOwnedResources({
+async function reconcileOwnedResources({
   docker,
   runId,
   name,
@@ -112,7 +116,7 @@ function reconcileOwnedResources({
   let safeContainerId = containerId;
   let safeNetworkId = networkId;
   if (containerCreateUncertain && !safeContainerId) {
-    const inspected = inspectOptional(() => docker(['inspect', name]));
+    const inspected = await inspectOptional(() => docker(['inspect', name]));
     if (inspected) {
       if (inspected.Name?.replace(/^\//, '') !== name) {
         throw new Error(
@@ -123,17 +127,17 @@ function reconcileOwnedResources({
     }
   }
   if (safeContainerId) {
-    const inspected = JSON.parse(docker(['inspect', safeContainerId]))[0];
+    const inspected = JSON.parse(await docker(['inspect', safeContainerId]))[0];
     ownedContainerId(inspected, safeContainerId, runId);
-    docker(['rm', '--force', safeContainerId]);
-    assertMissing(
+    await docker(['rm', '--force', safeContainerId]);
+    await assertMissing(
       () => docker(['inspect', safeContainerId]),
       'owned container must be removed',
     );
   }
 
   if (networkCreateUncertain && !safeNetworkId) {
-    const inspected = inspectOptional(() =>
+    const inspected = await inspectOptional(() =>
       docker(['network', 'inspect', name]),
     );
     if (inspected) {
@@ -151,7 +155,7 @@ function reconcileOwnedResources({
   }
   if (safeNetworkId) {
     const inspected = JSON.parse(
-      docker(['network', 'inspect', safeNetworkId]),
+      await docker(['network', 'inspect', safeNetworkId]),
     )[0];
     if (
       inspected.Id !== safeNetworkId ||
@@ -163,8 +167,8 @@ function reconcileOwnedResources({
         'Refusing cleanup: network identity or ownership labels do not match',
       );
     }
-    docker(['network', 'rm', safeNetworkId]);
-    assertMissing(
+    await docker(['network', 'rm', safeNetworkId]);
+    await assertMissing(
       () => docker(['network', 'inspect', safeNetworkId]),
       'owned network must be removed',
     );
@@ -172,9 +176,9 @@ function reconcileOwnedResources({
   return { containerId: safeContainerId, networkId: safeNetworkId };
 }
 
-function inspectOptional(inspect) {
+async function inspectOptional(inspect) {
   try {
-    return JSON.parse(inspect())[0];
+    return JSON.parse(await inspect())[0];
   } catch (error) {
     if (
       error.status === 1 &&
@@ -185,22 +189,95 @@ function inspectOptional(inspect) {
   }
 }
 
-function assertMissing(inspect, message) {
-  assert.equal(inspectOptional(inspect), undefined, message);
+async function assertMissing(inspect, message) {
+  assert.equal(await inspectOptional(inspect), undefined, message);
 }
 
-function run(command, args, options = {}) {
+async function run(command, args, options = {}) {
   options.guard?.();
+  options.signal?.throwIfAborted();
   const timeout =
     options.timeout ??
     timeoutFor(path.basename(command) === 'docker' ? 'docker' : 'prisma');
-  const result = spawnSync(command, args, {
-    cwd: options.cwd,
-    env: options.env,
-    encoding: 'utf8',
-    timeout,
-    maxBuffer: 8 * 1024 * 1024,
+  assert.ok(
+    Number.isInteger(timeout) && timeout > 0,
+    'subprocess timeout must be finite and positive',
+  );
+  const result = await new Promise((resolve) => {
+    // A dedicated process group lets cancellation stop only this command's descendants.
+    const grouped = process.platform !== 'win32';
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      detached: grouped,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const output = { stdout: [], stderr: [] };
+    const sizes = { stdout: 0, stderr: 0 };
+    let failure;
+    let killTimer;
+    const kill = (signal) => {
+      try {
+        if (grouped && child.pid) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch (error) {
+        if (error.code !== 'ESRCH') failure ??= error;
+      }
+    };
+    const stop = (error) => {
+      if (killTimer) return;
+      failure ??= error;
+      kill('SIGTERM');
+      killTimer = setTimeout(() => kill('SIGKILL'), 500);
+    };
+    const abort = () =>
+      stop(new Error('PostgreSQL verification cancelled by signal'));
+    options.signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(
+      () =>
+        stop(
+          Object.assign(
+            new Error(`${path.basename(command)} timed out after ${timeout}ms`),
+            { code: 'ETIMEDOUT', killed: true },
+          ),
+        ),
+      timeout,
+    );
+    for (const stream of ['stdout', 'stderr']) {
+      child[stream].on('data', (chunk) => {
+        sizes[stream] += chunk.length;
+        if (sizes[stream] > 8 * 1024 * 1024) {
+          stop(
+            Object.assign(
+              new Error(`${stream} exceeded subprocess maxBuffer`),
+              {
+                code: 'ENOBUFS',
+                killed: true,
+              },
+            ),
+          );
+        } else output[stream].push(chunk);
+      });
+    }
+    child.once('error', (error) => {
+      failure ??= error;
+    });
+    child.once('close', (status, signal) => {
+      clearTimeout(timer);
+      if (killTimer) kill('SIGKILL');
+      clearTimeout(killTimer);
+      options.signal?.removeEventListener('abort', abort);
+      resolve({
+        status,
+        signal,
+        error: failure,
+        stdout: Buffer.concat(output.stdout).toString('utf8'),
+        stderr: Buffer.concat(output.stderr).toString('utf8'),
+      });
+    });
+    if (options.signal?.aborted) abort();
   });
+  options.guard?.();
   if (result.error) {
     result.error.status = result.status;
     result.error.stderr = result.stderr || '';
@@ -258,19 +335,20 @@ function waitForPostgres(port, timeoutMs = 30_000, guard) {
   });
 }
 
-function waitForServerInsideContainer(
+async function waitForServerInsideContainer(
   containerId,
   user,
   database,
   home,
   timeoutMs = 30_000,
   guard,
+  signal,
 ) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     guard?.();
     try {
-      run(
+      await run(
         'docker',
         dockerArgs([
           'exec',
@@ -286,7 +364,12 @@ function waitForServerInsideContainer(
           '-d',
           database,
         ]),
-        { env: { PATH: process.env.PATH, HOME: home }, timeout: 5_000, guard },
+        {
+          env: { PATH: process.env.PATH, HOME: home },
+          timeout: 5_000,
+          guard,
+          signal,
+        },
       );
       return;
     } catch (error) {
@@ -297,13 +380,15 @@ function waitForServerInsideContainer(
       )
         throw error;
     }
-    const details = JSON.parse(docker(['inspect', containerId], { home }))[0];
+    const details = JSON.parse(
+      await docker(['inspect', containerId], { home, guard, signal }),
+    )[0];
     if (details.State?.Status !== 'running') {
       throw new Error(
         `PostgreSQL container is ${details.State?.Status}: ${details.State?.Error || ''}`,
       );
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
   throw new Error('PostgreSQL did not become ready inside the owned container');
 }
@@ -324,12 +409,13 @@ async function waitForPublishedPort(
   home,
   timeoutMs = 30_000,
   guard,
+  signal,
 ) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     guard?.();
     const details = JSON.parse(
-      docker(['inspect', containerId], { home, guard }),
+      await docker(['inspect', containerId], { home, guard, signal }),
     )[0];
     const binding = details.NetworkSettings?.Ports?.['5432/tcp']?.[0];
     if (binding?.HostIp === '127.0.0.1' && /^\d+$/.test(binding.HostPort)) {
@@ -427,12 +513,13 @@ async function main() {
   };
   const cancellation = createCancellation();
   const guard = cancellation.throwIfCancelled;
+  const commandOptions = { home: tempRoot, guard, signal: cancellation.signal };
   let passed = false;
 
-  const cleanup = () => {
+  const cleanup = async () => {
     let outcome = { containerId, networkId };
     try {
-      outcome = reconcileOwnedResources({
+      outcome = await reconcileOwnedResources({
         docker: (args) => docker(args, { home: tempRoot }),
         runId,
         name,
@@ -457,14 +544,14 @@ async function main() {
   const signalHandler = (signal) => {
     cancellation.request(signal);
   };
-  process.once('SIGINT', signalHandler);
-  process.once('SIGTERM', signalHandler);
+  process.on('SIGINT', signalHandler);
+  process.on('SIGTERM', signalHandler);
 
   try {
-    imageId = docker(['image', 'inspect', '--format', '{{.Id}}', IMAGE], {
-      home: tempRoot,
-      guard,
-    });
+    imageId = await docker(
+      ['image', 'inspect', '--format', '{{.Id}}', IMAGE],
+      commandOptions,
+    );
     assert.ok(
       imageId,
       'required PostgreSQL image must already exist; pulls are disabled',
@@ -472,7 +559,7 @@ async function main() {
     guard();
     port = await freePort();
     guard();
-    networkId = createPossiblyOwned(
+    networkId = await createPossiblyOwned(
       creationState,
       'networkCreateUncertain',
       () =>
@@ -486,10 +573,10 @@ async function main() {
             `${RUN_LABEL}=${runId}`,
             name,
           ],
-          { home: tempRoot, guard },
+          commandOptions,
         ),
     );
-    containerId = createPossiblyOwned(
+    containerId = await createPossiblyOwned(
       creationState,
       'containerCreateUncertain',
       () =>
@@ -517,13 +604,13 @@ async function main() {
             `${RUN_LABEL}=${runId}`,
             IMAGE,
           ],
-          { home: tempRoot, guard },
+          commandOptions,
         ),
     );
-    docker(['start', containerId], { home: tempRoot, guard });
+    await docker(['start', containerId], commandOptions);
 
     const details = JSON.parse(
-      docker(['inspect', containerId], { home: tempRoot, guard }),
+      await docker(['inspect', containerId], commandOptions),
     )[0];
     assert.equal(details.Id, containerId);
     assert.equal(details.Config.Image, IMAGE);
@@ -557,6 +644,7 @@ async function main() {
       tempRoot,
       30_000,
       guard,
+      cancellation.signal,
     );
     assert.equal(
       publishedPort,
@@ -565,7 +653,7 @@ async function main() {
     );
     assert.ok(Number.isInteger(port) && port > 0);
     const network = JSON.parse(
-      docker(['network', 'inspect', name], { home: tempRoot, guard }),
+      await docker(['network', 'inspect', name], commandOptions),
     )[0];
     assert.equal(network.Id, networkId);
     assert.equal(
@@ -604,16 +692,17 @@ async function main() {
       mode: 0o600,
       flag: 'wx',
     });
-    waitForServerInsideContainer(
+    await waitForServerInsideContainer(
       containerId,
       user,
       database,
       tempRoot,
       30_000,
       guard,
+      cancellation.signal,
     );
     await waitForPostgres(port, 30_000, guard);
-    serverVersion = docker(
+    serverVersion = await docker(
       [
         'exec',
         containerId,
@@ -626,7 +715,7 @@ async function main() {
         '-c',
         'SHOW server_version',
       ],
-      { home: tempRoot, guard },
+      commandOptions,
     );
     assert.match(
       serverVersion,
@@ -655,15 +744,16 @@ async function main() {
       run(
         process.execPath,
         [prismaCli, 'migrate', 'deploy', '--schema', schema],
-        { cwd: tempRoot, env: isolatedEnv, guard },
+        { cwd: tempRoot, env: isolatedEnv, guard, signal: cancellation.signal },
       );
-    run(process.execPath, [prismaCli, 'generate', '--schema', schema], {
+    await run(process.execPath, [prismaCli, 'generate', '--schema', schema], {
       cwd: tempRoot,
       env: isolatedEnv,
       timeout: timeoutFor('prisma'),
       guard,
+      signal: cancellation.signal,
     });
-    migrate();
+    await migrate();
     const psql = (sql) =>
       docker(
         [
@@ -679,23 +769,23 @@ async function main() {
           '-c',
           sql,
         ],
-        { home: tempRoot, guard },
+        commandOptions,
       );
-    psql(
+    await psql(
       `INSERT INTO "Patient" ("id","rut","firstName","lastName","dateOfBirth","updatedAt") VALUES ('${proof.baselinePatient}','synthetic-${proof.baselinePatient}','Synthetic','Verification','1990-01-01 00:00:00','2026-01-02 03:04:05.678')`,
     );
-    psql(
+    await psql(
       `INSERT INTO "Odontogram" ("id","patientId","teethStates","updatedAt") VALUES ('${proof.baselineOdontogram}','${proof.baselinePatient}','${proof.baselineJson}'::jsonb,'2026-01-02 03:04:05.678')`,
     );
     copyMigrationStage(apiRoot, tempRoot, true);
-    migrate();
+    await migrate();
 
     const jestPackage = path.dirname(
       path.dirname(require.resolve('jest', { paths: [apiRoot] })),
     );
     const jestCli = path.join(jestPackage, 'bin', 'jest.js');
     const jestReport = path.join(tempRoot, 'jest-results.json');
-    run(
+    await run(
       process.execPath,
       [
         jestCli,
@@ -706,7 +796,13 @@ async function main() {
         '--outputFile',
         jestReport,
       ],
-      { cwd: apiRoot, env: isolatedEnv, timeout: timeoutFor('jest'), guard },
+      {
+        cwd: apiRoot,
+        env: isolatedEnv,
+        timeout: timeoutFor('jest'),
+        guard,
+        signal: cancellation.signal,
+      },
     );
     const testSummary = JSON.parse(fs.readFileSync(jestReport, 'utf8'));
     assert.equal(
@@ -756,6 +852,7 @@ module.exports = {
   dockerArgs,
   ownedContainerId,
   reconcileOwnedResources,
+  run,
   subprocessEnvironment,
   timeoutFor,
   validateIsolatedClient,
