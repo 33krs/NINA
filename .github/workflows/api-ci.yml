@@ -1,0 +1,55 @@
+name: API CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - feature/appointments
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  api:
+    name: API checks and isolated PostgreSQL 15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npm --workspace @nina/api exec -- prisma generate --schema prisma/schema.prisma
+
+      - name: Run non-live API tests
+        run: npm --workspace @nina/api test -- --runInBand --testPathIgnorePatterns='\.live\.spec\.ts$'
+
+      - name: Lint API
+        run: npm --workspace @nina/api run lint
+
+      - name: Build API
+        run: npm --workspace @nina/api run build
+
+      - name: Test PostgreSQL runner safety
+        run: node --test apps/api/scripts/verify-odontogram-postgres.test.cjs
+
+      - name: Pull isolated PostgreSQL test image
+        run: docker --host unix:///var/run/docker.sock pull postgres:15-alpine
+
+      - name: Run isolated PostgreSQL 15 regression suite
+        run: npm --workspace @nina/api run test:odontogram:postgres
