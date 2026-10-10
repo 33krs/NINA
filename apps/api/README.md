@@ -3,6 +3,11 @@
 Run the ordinary API checks with `npm --workspace @nina/api test` and
 `npm --workspace @nina/api run lint`.
 
+Pull requests and pushes to `feature/appointments` run the API checks and the
+isolated PostgreSQL 15 regression suite in GitHub Actions. CI uses a temporary
+hosted runner and pulls the test image there; the local suite below still
+requires `postgres:15-alpine` to be present before running.
+
 ## Odontogram PostgreSQL 15 regression
 
 Run `npm --workspace @nina/api run test:odontogram:postgres` to exercise the
