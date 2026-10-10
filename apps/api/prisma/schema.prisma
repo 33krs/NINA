@@ -1,0 +1,149 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// Clinical Module (FHIR-inspired)
+// ==========================================
+
+model Patient {
+  id            String         @id @default(uuid())
+  rut           String         @unique
+  firstName     String
+  lastName      String
+  dateOfBirth   DateTime
+  familyId      String?
+  family        Family?        @relation(fields: [familyId], references: [id])
+  encounters    Encounter[]
+  prescriptions Prescription[]
+  immunizations Immunization[]
+  odontogram    Odontogram?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+}
+
+model Family {
+  id              String    @id @default(uuid())
+  code            String    @unique
+  address         String
+  members         Patient[]
+  socialRiskLevel Int
+}
+
+model Encounter {
+  id             String          @id @default(uuid())
+  patientId      String
+  patient        Patient         @relation(fields: [patientId], references: [id])
+  professionalId String
+  date           DateTime
+  status         EncounterStatus
+  soapSubjective String?
+  soapObjective  String?
+  soapAssessment String?
+  soapPlan       String?
+}
+
+enum EncounterStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+// ==========================================
+// Dental Module
+// ==========================================
+
+model Odontogram {
+  id          String   @id @default(uuid())
+  patientId   String   @unique
+  patient     Patient  @relation(fields: [patientId], references: [id])
+  teethStates Json
+  updatedAt   DateTime @updatedAt
+}
+
+// ==========================================
+// Scheduling Module
+// ==========================================
+
+model Appointment {
+  id             String            @id @default(uuid())
+  patientId      String
+  professionalId String
+  startTime      DateTime
+  endTime        DateTime
+  status         AppointmentStatus
+
+  @@unique([professionalId, startTime, endTime])
+}
+
+enum AppointmentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+// ==========================================
+// Pharmacy & Logistics Module
+// ==========================================
+
+model Medication {
+  id              String             @id @default(uuid())
+  code            String             @unique
+  name            String
+  activePrinciple String
+  batches         Batch[]
+  prescriptions   PrescriptionItem[]
+}
+
+model Batch {
+  id             String     @id @default(uuid())
+  medicationId   String
+  medication     Medication @relation(fields: [medicationId], references: [id])
+  lotNumber      String
+  expirationDate DateTime
+  stock          Int
+  createdAt      DateTime   @default(now())
+}
+
+model Prescription {
+  id        String             @id @default(uuid())
+  patientId String
+  patient   Patient            @relation(fields: [patientId], references: [id])
+  date      DateTime           @default(now())
+  items     PrescriptionItem[]
+  status    PrescriptionStatus
+}
+
+model PrescriptionItem {
+  id             String       @id @default(uuid())
+  prescriptionId String
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id])
+  medicationId   String
+  medication     Medication   @relation(fields: [medicationId], references: [id])
+  quantity       Int
+}
+
+enum PrescriptionStatus {
+  ISSUED
+  DISPENSED
+  CANCELLED
+}
+
+// ==========================================
+// Immunization Module
+// ==========================================
+
+model Immunization {
+  id               String   @id @default(uuid())
+  patientId        String
+  patient          Patient  @relation(fields: [patientId], references: [id])
+  vaccineCode      String
+  dateAdministered DateTime
+  payloadRNI       Json?
+}
