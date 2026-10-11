@@ -120,31 +120,59 @@ model Medication {
 }
 
 model Batch {
-  id             String     @id @default(uuid())
-  medicationId   String
-  medication     Medication @relation(fields: [medicationId], references: [id])
-  lotNumber      String
-  expirationDate DateTime
-  stock          Int
-  createdAt      DateTime   @default(now())
+  id                    String                             @id @default(uuid())
+  medicationId          String
+  medication            Medication                         @relation(fields: [medicationId], references: [id])
+  lotNumber             String
+  expirationDate        DateTime
+  stock                 Int
+  createdAt             DateTime                           @default(now())
+  dispensingAllocations PrescriptionDispensingAllocation[]
 }
 
 model Prescription {
-  id        String             @id @default(uuid())
-  patientId String
-  patient   Patient            @relation(fields: [patientId], references: [id])
-  date      DateTime           @default(now())
-  items     PrescriptionItem[]
-  status    PrescriptionStatus
+  id          String                   @id @default(uuid())
+  patientId   String
+  patient     Patient                  @relation(fields: [patientId], references: [id])
+  date        DateTime                 @default(now())
+  items       PrescriptionItem[]
+  status      PrescriptionStatus
+  dispensings PrescriptionDispensing[]
 }
 
 model PrescriptionItem {
-  id             String       @id @default(uuid())
+  id                    String                             @id @default(uuid())
+  prescriptionId        String
+  prescription          Prescription                       @relation(fields: [prescriptionId], references: [id])
+  medicationId          String
+  medication            Medication                         @relation(fields: [medicationId], references: [id])
+  quantity              Int
+  dispensingAllocations PrescriptionDispensingAllocation[]
+}
+
+model PrescriptionDispensing {
+  id             String                             @id @default(uuid())
   prescriptionId String
-  prescription   Prescription @relation(fields: [prescriptionId], references: [id])
-  medicationId   String
-  medication     Medication   @relation(fields: [medicationId], references: [id])
-  quantity       Int
+  prescription   Prescription                       @relation(fields: [prescriptionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  dispensedAt    DateTime                           @default(now())
+  allocations    PrescriptionDispensingAllocation[]
+
+  @@index([prescriptionId, dispensedAt])
+}
+
+model PrescriptionDispensingAllocation {
+  id                 String                 @id @default(uuid())
+  dispensingId       String
+  dispensing         PrescriptionDispensing @relation(fields: [dispensingId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  prescriptionItemId String
+  prescriptionItem   PrescriptionItem       @relation(fields: [prescriptionItemId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  batchId            String
+  batch              Batch                  @relation(fields: [batchId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  quantity           Int
+
+  @@unique([dispensingId, prescriptionItemId, batchId], map: "PrescriptionDispensingAllocation_dispensing_item_batch_key")
+  @@index([prescriptionItemId])
+  @@index([batchId])
 }
 
 enum PrescriptionStatus {
