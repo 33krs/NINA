@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const Module = require('node:module');
+const { verifyContention } = require('./verify-pharmacy-contention.cjs');
 const {
   dockerArgs,
   ownedContainerId,
@@ -469,6 +470,25 @@ async function main(
     assert.equal(await db.prescriptionDispensing.count(), 3);
     assert.equal(await db.prescriptionDispensingAllocation.count(), 3);
     await verifyReplayAndRollback(db, service, completed);
+    // Derive pooling options only after the canonical private datasource passes its guard.
+    const singleConnection = new URL(config.databaseUrl);
+    singleConnection.searchParams.set('connection_limit', '1');
+    const contenders = [];
+    for (let index = 0; index < 4; index++) {
+      const client = new PrismaClient({
+        datasourceUrl: singleConnection.toString(),
+        transactionOptions: { timeout: 15000 },
+      });
+      clients.push(client);
+      contenders.push(client);
+    }
+    const [blocker, monitor, ...writers] = contenders;
+    await verifyContention(db, {
+      blocker,
+      monitor,
+      writers,
+      services: writers.map((client) => new PharmacyDispensingService(client)),
+    });
   } finally {
     const disconnected = await Promise.allSettled(
       clients.map((client) => client.$disconnect()),

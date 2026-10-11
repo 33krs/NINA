@@ -146,14 +146,20 @@ The actual service must propagate that marker and leave the complete snapshot
 unchanged, with no failed event. Trigger/function cleanup runs in `finally`; their
 absence and a successful retry using the same event ID prove recovery. The printed
 baseline summary remains compatible with the shared runner and is emitted only
-after these extra assertions pass. Observable contention remains pending.
-The import-only contention observer component validates both expected writer
-backend PID/start identities, active row-lock queries and causal blocker paths,
-including peer soft queues. Its unit safety tests reject changed/missing identities,
-unrelated blockers, cycles and incorrect waits. This component is **not wired into
-the runtime suite** and does not yet prove actual PostgreSQL concurrency; the
-real-client gates and serialization scenarios belong to the following slice.
+after these extra assertions pass.
 
+The contention proof holds a real prescription or shared batch row lock while two
+separate, single-connection clients call the actual service. It observes both
+writer backend PID/start identities actively waiting in the expected `FOR UPDATE`
+query, with blocker paths reaching the held backend (including soft queueing
+through the peer). Only that observation releases the gate; polling is not timing
+proof. Same-prescription requests cannot exceed pending quantity, and different
+prescriptions cannot overdraw shared stock. Exact outcomes, recorded allocations,
+stock, statuses and loser history are asserted. Observation has a three-second
+deadline and monitor statements are bounded; fixture clients alone use a
+15-second transaction timeout. Finally releases gates, settles launched work and
+disconnects all clients. Concurrent exact replay/global-ID collision remain
+pending; observer unit tests alone do not prove database concurrency.
 The suite does not expose an endpoint or use Redis.
 Both existing modes remain available unchanged; never invoke the child directly
 with an ambient datasource or bypass its runner-issued ownership checks.
