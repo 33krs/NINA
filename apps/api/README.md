@@ -148,7 +148,18 @@ contract. It checks canonical private-root/run/image inputs, exact Redis resourc
 names/labels/image identity and target-specific absence errors. These predicates
 neither inspect Docker nor grant removal authority. Its shared synthetic fixture
 creates only an empty private directory and metadata, never authentication files.
-Creation tracking and reconciliation are not wired in this intermediate slice.
+Creation tracking and reconciliation use these contracts; actual runtime proof remains pending.
+
+`pharmacy-redis-resources.cjs` supplies an opaque run/image/private-root tracker.
+The future orchestrator wraps its bounded create operation with `captureCreation`
+so uncertainty is registered before awaiting Docker output. Cleanup internally
+inspects only exact known IDs or the fresh UUID-bound name through the pinned
+socket, verifies Redis ownership/image identity and removes the container before
+an empty owned network. Created/stopped fixtures are valid cleanup targets;
+foreign members, ambiguous errors and unproved absence fail closed. Cleanup has
+its own bounded deadline, independent of an aborted creation signal. Unit executor
+doubles establish these state transitions, not disposable Docker cleanup proof.
+No standalone entrypoint or disposable runner is wired yet.
 
 ### Calendar-date batch expiry
 
