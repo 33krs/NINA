@@ -1,6 +1,44 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { main } = require('./verify-pharmacy-dispensing.cjs');
+const { assertUnchanged } = require('./verify-pharmacy-dispensing.cjs');
+
+test('no-write assertion detects stock mutation despite unchanged history', () => {
+  const before = { batches: [{ id: 'batch', stock: 4 }], events: [] };
+  const after = { batches: [{ id: 'batch', stock: 2 }], events: [] };
+  assert.throws(() => assertUnchanged(before, after));
+});
+
+test('no-write assertion accepts identical complete snapshots', () => {
+  const snapshot = {
+    patients: [],
+    medications: [],
+    batches: [],
+    prescriptions: [],
+    items: [],
+    events: [],
+    allocations: [],
+  };
+  assert.doesNotThrow(() =>
+    assertUnchanged(snapshot, structuredClone(snapshot)),
+  );
+});
+
+for (const field of [
+  'patients',
+  'medications',
+  'batches',
+  'prescriptions',
+  'items',
+  'events',
+  'allocations',
+]) {
+  test(`no-write assertion detects a changed ${field} row`, () => {
+    const before = { [field]: [{ id: 'row', value: 'original' }] };
+    const after = { [field]: [{ id: 'row', value: 'changed' }] };
+    assert.throws(() => assertUnchanged(before, after));
+  });
+}
 
 test('missing runner opt-in rejects before client loading or connections', async () => {
   let loads = 0;

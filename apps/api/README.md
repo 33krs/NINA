@@ -135,8 +135,19 @@ transitive service imports bind only to that isolated generated client.
 
 The baseline calls the actual compiled service for three requested portions,
 checks partial/full status across two items and exact stock/history, and rejects
-expired-only stock without mutation. Replay, injected rollback and observable
-contention proofs remain pending. It does not expose an endpoint or use Redis.
+expired-only stock without mutation. It additionally proves exact replay after
+terminal completion and rejects changed quantity/item/prescription keys, comparing
+deterministic full-row snapshots of patients, medications, batches, prescriptions,
+items, events and allocations after every call.
+
+A fixture-only allocation trigger first checks that its transaction sees the
+expected stock decrement, then raises `PHARMACY_PROOF_ROLLBACK_STOCK_VISIBLE`.
+The actual service must propagate that marker and leave the complete snapshot
+unchanged, with no failed event. Trigger/function cleanup runs in `finally`; their
+absence and a successful retry using the same event ID prove recovery. The printed
+baseline summary remains compatible with the shared runner and is emitted only
+after these extra assertions pass. Observable contention remains pending.
+The suite does not expose an endpoint or use Redis.
 Both existing modes remain available unchanged; never invoke the child directly
 with an ambient datasource or bypass its runner-issued ownership checks.
 
