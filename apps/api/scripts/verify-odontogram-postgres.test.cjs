@@ -7,6 +7,7 @@ const { spawn } = require('node:child_process');
 const {
   dockerArgs,
   parseSuite,
+  prepareIsolatedClient,
   writePostgresEnvironment,
   copyMigrationStage,
   ownedContainerId,
@@ -418,6 +419,8 @@ test('subprocess environment excludes ambient database and credential values', (
     HOME: '/tmp/nina-suite',
     TMPDIR: '/tmp/nina-suite',
     DATABASE_URL: 'postgresql://suite@127.0.0.1:49152/suite',
+    PRISMA_GENERATE_SKIP_AUTOINSTALL: '1',
+    CHECKPOINT_DISABLE: '1',
     NINA_ODONTOGRAM_PG15_RUN_ID: 'run-123',
     NINA_ODONTOGRAM_PG15_PROOF_FILE: '/tmp/nina-suite/proof.json',
     NINA_ODONTOGRAM_PG15_TESTS: '1',
@@ -775,4 +778,313 @@ test('all subprocess error fields redact fresh passwords and datasource URLs', a
       return true;
     },
   );
+});
+
+test('fixed diagnostic stages emit only STARTED and PASSED labels', async () => {
+  const messages = [];
+  const original = console.log;
+  console.log = (message) => messages.push(message);
+  try {
+    for (const stage of [
+      'prisma-generate',
+      'migrate-predecessors',
+      'migrate-history',
+    ]) {
+      assert.equal(
+        await run(process.execPath, ['-e', 'console.log("fresh_secret")'], {
+          stage,
+        }),
+        'fresh_secret',
+      );
+      assert.deepEqual(messages.splice(0), [
+        `PG15_STAGE_STARTED ${stage}`,
+        `PG15_STAGE_PASSED ${stage}`,
+      ]);
+    }
+  } finally {
+    console.log = original;
+  }
+});
+
+test('stage failure context follows redaction and identifies bounded timeouts', async () => {
+  const messages = [];
+  const original = console.log;
+  console.log = (message) => messages.push(message);
+  try {
+    for (const [stage, args, timeout, expected] of [
+      [
+        'prisma-generate',
+        ['-e', 'console.error("fresh_secret"); process.exit(7)'],
+        1000,
+        { status: 7 },
+      ],
+      [
+        'migrate-history',
+        ['-e', 'setInterval(() => {}, 1000)'],
+        20,
+        { code: 'ETIMEDOUT', killed: true },
+      ],
+    ]) {
+      await assert.rejects(
+        run(process.execPath, args, {
+          stage,
+          timeout,
+          redactions: ['fresh_secret'],
+        }),
+        (error) => {
+          for (const [key, value] of Object.entries(expected))
+            assert.equal(error[key], value);
+          assert.equal(error.stage, stage);
+          assert.doesNotMatch(
+            error.message + error.stderr + error.stack,
+            /fresh_secret/,
+          );
+          return true;
+        },
+      );
+      assert.deepEqual(messages.splice(0), [
+        `PG15_STAGE_STARTED ${stage}`,
+        `PG15_STAGE_FAILED ${stage}`,
+      ]);
+    }
+  } finally {
+    console.log = original;
+  }
+});
+
+test('unknown diagnostic labels are rejected before launching without echoing input', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-stage-label-test-'));
+  const marker = path.join(root, 'launched');
+  try {
+    await assert.rejects(
+      run(
+        process.execPath,
+        [
+          '-e',
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'launched')`,
+        ],
+        { stage: 'fresh_secret' },
+      ),
+      (error) => {
+        assert.match(error.message, /Unknown diagnostic stage/);
+        assert.doesNotMatch(error.message + error.stack, /fresh_secret/);
+        return true;
+      },
+    );
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function copiedClientFixture(root) {
+  const apiRoot = path.resolve(__dirname, '..');
+  const schema = path.join(root, 'prisma', 'schema.prisma');
+  fs.mkdirSync(path.dirname(schema));
+  fs.copyFileSync(path.join(apiRoot, 'prisma', 'schema.prisma'), schema);
+  return { apiRoot, schema };
+}
+
+test('temporary generator resolution links only the installed client and cleanup preserves it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-client-link-test-'));
+  const { apiRoot, schema } = copiedClientFixture(root);
+  const packagePath = require.resolve('@prisma/client/package.json', {
+    paths: [apiRoot],
+  });
+  const packageBytes = fs.readFileSync(packagePath);
+  try {
+    assert.equal(
+      prepareIsolatedClient(schema, root),
+      path.join(root, 'isolated-client', 'index.js'),
+    );
+    const link = path.join(root, 'node_modules', '@prisma', 'client');
+    assert.equal(fs.existsSync(link), true);
+    assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+    assert.equal(
+      fs.realpathSync(link),
+      fs.realpathSync(path.dirname(packagePath)),
+    );
+    assert.equal(fs.existsSync(path.join(root, 'prisma', '.env')), false);
+    assert.match(
+      fs.readFileSync(schema, 'utf8'),
+      /output = "..\/isolated-client"/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  assert.deepEqual(fs.readFileSync(packagePath), packageBytes);
+});
+
+test('generator preparation refuses public temporary storage and external schema paths', () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nina-client-boundary-test-'),
+  );
+  const external = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nina-client-external-test-'),
+  );
+  const { schema } = copiedClientFixture(root);
+  const externalSchema = path.join(external, 'schema.prisma');
+  fs.copyFileSync(schema, externalSchema);
+  const original = fs.readFileSync(externalSchema);
+  try {
+    assert.throws(
+      () => prepareIsolatedClient(externalSchema, root),
+      /private temporary storage/,
+    );
+    assert.deepEqual(fs.readFileSync(externalSchema), original);
+    fs.chmodSync(root, 0o755);
+    assert.throws(
+      () => prepareIsolatedClient(schema, root),
+      /private temporary storage/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(external, { recursive: true, force: true });
+  }
+});
+
+// Prisma 6.19.3 get-platform p8e uses this exact read-only libssl probe.
+const LOCAL_LIBSSL_PROBE =
+  'ldconfig -p | sed "s/.*=>s*//" | sed "s|.*/||" | grep libssl | sort | grep -v "libssl.so.0"';
+
+function writeOfflineGenerationGuard(root) {
+  const guard = path.join(root, 'offline-guard.cjs');
+  const refused = path.join(root, 'refused');
+  const probes = path.join(root, 'read-only-probes');
+  fs.writeFileSync(
+    guard,
+    `
+    const fs=require('node:fs'), path=require('node:path'), cp=require('node:child_process');
+    let localProbeActive=false;
+    function deny(kind) { fs.appendFileSync(${JSON.stringify(refused)}, kind+'\\n'); throw new Error('Offline verification refused '+kind); }
+    for (const method of ['spawn','execFile','spawnSync','execFileSync']) {
+      const original=cp[method];
+      cp[method]=function(command,args,...rest) {
+        if (method==='execFile' && localProbeActive && command===${JSON.stringify(LOCAL_LIBSSL_PROBE)} && args?.shell===true && args?.env?.PATH==='/usr/sbin:/usr/bin:/sbin:/bin') return original.call(this,command,args,...rest);
+        const name=path.basename(String(command));
+        if (!['node','openssl','uname','ldd','getconf'].includes(name) && !name.startsWith('schema-engine-')) deny('installer');
+        if (Array.isArray(args) && args.some(arg => /npm-cli|pnpm|yarn|npx/.test(String(arg)))) deny('installer');
+        return original.call(this,command,args,...rest);
+      };
+    }
+    const exec=cp.exec;
+    cp.exec=function(command,callback) {
+      if (command!==${JSON.stringify(LOCAL_LIBSSL_PROBE)} || arguments.length!==2 || typeof callback!=='function') deny('shell');
+      fs.appendFileSync(${JSON.stringify(probes)}, 'libssl\\n');
+      localProbeActive=true;
+      try { return exec.call(this,command,{env:{...process.env,PATH:'/usr/sbin:/usr/bin:/sbin:/bin'}},callback); }
+      finally { localProbeActive=false; }
+    };
+    cp.execSync=()=>deny('shell');
+    for (const module of ['node:http','node:https']) { const m=require(module); m.request=m.get=()=>deny('network'); }
+    require('node:net').Socket.prototype.connect=()=>deny('network');
+    globalThis.fetch=()=>deny('network');
+  `,
+    { mode: 0o600 },
+  );
+  return { guard, refused, probes };
+}
+
+test('offline guard admits only the exact read-only probe and denies shell, installer and network operations', async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nina-offline-guard-test-'),
+  );
+  const { guard, refused, probes } = writeOfflineGenerationGuard(root);
+  try {
+    await run(
+      process.execPath,
+      [
+        '--require',
+        guard,
+        '-e',
+        `
+        const assert=require('node:assert/strict'), cp=require('node:child_process');
+        for (const command of ['printf unknown', ${JSON.stringify(LOCAL_LIBSSL_PROBE + '; npm install')}]) {
+          assert.throws(()=>cp.exec(command,()=>{}), /refused shell/);
+        }
+        assert.throws(()=>cp.execSync(${JSON.stringify(LOCAL_LIBSSL_PROBE)}), /refused shell/);
+        assert.throws(()=>cp.exec(${JSON.stringify(LOCAL_LIBSSL_PROBE)},{shell:'/unknown'},()=>{}), /refused shell/);
+        assert.throws(()=>cp.execFile(${JSON.stringify(LOCAL_LIBSSL_PROBE)},{shell:true}), /refused installer/);
+        assert.throws(()=>cp.spawn('npm',['install']), /refused installer/);
+        assert.throws(()=>cp.spawn('node',['npm-cli.js']), /refused installer/);
+        assert.throws(()=>require('node:http').request('http://127.0.0.1:1'), /refused network/);
+        assert.throws(()=>require('node:https').get('https://127.0.0.1:1'), /refused network/);
+        assert.throws(()=>new (require('node:net').Socket)().connect(1,'127.0.0.1'), /refused network/);
+        assert.throws(()=>fetch('http://127.0.0.1:1'), /refused network/);
+        cp.exec(${JSON.stringify(LOCAL_LIBSSL_PROBE)},(error,stdout)=> {
+          assert.equal(error,null);
+          assert.match(stdout,/libssl/);
+        });
+      `,
+      ],
+      { cwd: root, env: { PATH: '/usr/bin:/bin', HOME: root, TMPDIR: root } },
+    );
+    assert.deepEqual(fs.readFileSync(refused, 'utf8').trim().split('\n'), [
+      'shell',
+      'shell',
+      'shell',
+      'shell',
+      'installer',
+      'installer',
+      'installer',
+      'network',
+      'network',
+      'network',
+      'network',
+    ]);
+    assert.equal(fs.readFileSync(probes, 'utf8'), 'libssl\n');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('copied-schema generation succeeds offline without installer or network execution', async (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nina-offline-generate-test-'),
+  );
+  const { apiRoot, schema } = copiedClientFixture(root);
+  const { guard, refused, probes } = writeOfflineGenerationGuard(root);
+  try {
+    const client = prepareIsolatedClient(schema, root);
+    await run(
+      process.execPath,
+      [
+        '--require',
+        guard,
+        path.join(apiRoot, 'node_modules', 'prisma', 'build', 'index.js'),
+        'generate',
+        '--schema',
+        schema,
+      ],
+      {
+        cwd: root,
+        timeout: 60000,
+        env: subprocessEnvironment({
+          path: process.env.PATH,
+          home: root,
+          databaseUrl: 'postgresql://offline@127.0.0.1:1/offline?schema=public',
+          runId: 'offline-only',
+          proofFile: path.join(root, 'proof.json'),
+        }),
+      },
+    );
+    assert.equal(fs.existsSync(client), true);
+    assert.equal(
+      fs.existsSync(refused),
+      false,
+      fs.existsSync(refused)
+        ? `forbidden attempt: ${fs.readFileSync(refused, 'utf8')}`
+        : 'no installer or network launch attempted',
+    );
+    assert.equal(fs.existsSync(path.join(root, 'prisma', '.env')), false);
+    const probeCount = fs.existsSync(probes)
+      ? fs.readFileSync(probes, 'utf8').trim().split('\n').length
+      : 0;
+    t.diagnostic(
+      `Offline generation: forbidden attempts=0; read-only libssl probes=${probeCount}`,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  assert.equal(fs.existsSync(root), false);
 });

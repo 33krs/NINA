@@ -67,6 +67,8 @@ function subprocessEnvironment({
     HOME: home,
     TMPDIR: home,
     DATABASE_URL: databaseUrl,
+    PRISMA_GENERATE_SKIP_AUTOINSTALL: '1',
+    CHECKPOINT_DISABLE: '1',
     NINA_ODONTOGRAM_PG15_RUN_ID: runId,
     NINA_ODONTOGRAM_PG15_PROOF_FILE: proofFile,
     NINA_ODONTOGRAM_PG15_TESTS: '1',
@@ -231,6 +233,14 @@ function redact(value, secrets = []) {
 }
 
 async function run(command, args, options = {}) {
+  const stage = options.stage;
+  if (
+    stage !== undefined &&
+    !['prisma-generate', 'migrate-predecessors', 'migrate-history'].includes(
+      stage,
+    )
+  )
+    throw new Error('Unknown diagnostic stage');
   options.guard?.();
   options.signal?.throwIfAborted();
   const timeout =
@@ -240,6 +250,7 @@ async function run(command, args, options = {}) {
     Number.isInteger(timeout) && timeout > 0,
     'subprocess timeout must be finite and positive',
   );
+  if (stage) console.log(`PG15_STAGE_STARTED ${stage}`);
   const result = await new Promise((resolve) => {
     // A dedicated process group lets cancellation stop only this command's descendants.
     const grouped = process.platform !== 'win32';
@@ -329,9 +340,14 @@ async function run(command, args, options = {}) {
     error.killed = result.error?.killed;
     error.status = result.status;
     error.stderr = result.stderr;
+    if (stage) {
+      error.stage = stage;
+      console.log(`PG15_STAGE_FAILED ${stage}`);
+    }
     throw error;
   }
   options.guard?.();
+  if (stage) console.log(`PG15_STAGE_PASSED ${stage}`);
   return (result.stdout || '').trim();
 }
 
@@ -474,6 +490,40 @@ async function waitForPublishedPort(
 }
 
 function prepareIsolatedClient(schemaPath, tempRoot) {
+  const root = fs.realpathSync(tempRoot);
+  const stats = fs.lstatSync(tempRoot);
+  if (
+    !stats.isDirectory() ||
+    (stats.mode & 0o077) !== 0 ||
+    !fs.realpathSync(schemaPath).startsWith(root + path.sep)
+  )
+    throw new Error('Prisma generation requires private temporary storage');
+  const apiRoot = path.resolve(__dirname, '..');
+  const packageFile = require.resolve('@prisma/client/package.json', {
+    paths: [apiRoot],
+  });
+  const installed = fs.realpathSync(path.dirname(packageFile));
+  const localRoots = [
+    path.join(apiRoot, 'node_modules'),
+    path.resolve(apiRoot, '../../node_modules'),
+  ];
+  if (
+    !localRoots.some(
+      (local) =>
+        path.dirname(packageFile).startsWith(local + path.sep) &&
+        installed.startsWith(local + path.sep),
+    ) ||
+    JSON.parse(fs.readFileSync(packageFile, 'utf8')).name !== '@prisma/client'
+  )
+    throw new Error(
+      'Prisma client must resolve from installed local dependencies',
+    );
+  // The copied schema cannot resolve project packages from its temporary ancestry.
+  // Link only this installed package; never let generation auto-install dependencies.
+  const modules = path.join(root, 'node_modules');
+  fs.mkdirSync(modules, { mode: 0o700 });
+  fs.mkdirSync(path.join(modules, '@prisma'), { mode: 0o700 });
+  fs.symlinkSync(installed, path.join(modules, '@prisma', 'client'), 'dir');
   let schema = fs.readFileSync(schemaPath, 'utf8');
   let found = false;
   schema = schema.replace(
@@ -825,7 +875,7 @@ async function main() {
       'build',
       'index.js',
     );
-    const migrate = () =>
+    const migrate = (stage) =>
       run(
         process.execPath,
         [prismaCli, 'migrate', 'deploy', '--schema', schema],
@@ -835,6 +885,7 @@ async function main() {
           guard,
           signal: cancellation.signal,
           redactions,
+          stage,
         },
       );
     if (!pharmacy)
@@ -842,10 +893,11 @@ async function main() {
         cwd: tempRoot,
         env: isolatedEnv,
         timeout: timeoutFor('prisma'),
+        stage: 'prisma-generate',
         guard,
         signal: cancellation.signal,
       });
-    await migrate();
+    await migrate('migrate-predecessors');
     const psql = (sql) =>
       docker(
         [
@@ -891,7 +943,7 @@ async function main() {
       `INSERT INTO "Odontogram" ("id","patientId","teethStates","updatedAt") VALUES ('${proof.baselineOdontogram}','${proof.baselinePatient}','${proof.baselineJson}'::jsonb,'2026-01-02 03:04:05.678')`,
     );
     copyMigrationStage(apiRoot, tempRoot, true);
-    await migrate();
+    await migrate('migrate-history');
 
     const jestPackage = path.dirname(
       path.dirname(require.resolve('jest', { paths: [apiRoot] })),
@@ -960,6 +1012,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  prepareIsolatedClient,
   parseSuite,
   writePostgresEnvironment,
   copyMigrationStage,
