@@ -132,7 +132,16 @@ explicit caller-owned client/service instances and a fixture key; it constructs
 no client, loads no adapter and discovers no URL or environment configuration.
 Assertions cover Redis7, NX/PX10000, owner-safe Lua, bounded natural expiry and
 successor preservation. Its dependency-double tests do not establish live Redis
-proof. The guarded child and disposable orchestration are not wired in this slice.
+proof. Disposable orchestration and actual runtime execution remain unwired.
+
+`verify-pharmacy-redis-scenarios.cjs` is the guarded scenario child, not an
+orchestrator. Explicit run UUID/private proof arguments bind exact-ID observations
+obtained internally through the pinned socket. Existing guards run before the
+canonical compiled adapter is loaded or any client is created; only then does the
+child delegate to the lease assertions with its owned instances. Finally destroys
+all opened clients, including partial startup failures; CLI errors are generic.
+Disposable orchestration, actual Redis execution and exact resource cleanup proof
+remain pending. VM startup tests are safety evidence, not live Redis proof.
 
 ### Calendar-date batch expiry
 
