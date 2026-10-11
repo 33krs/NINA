@@ -62,14 +62,35 @@ missing legacy history is not a complete history. In particular, an existing
 `DISPENSED` prescription without ledger records has unknown delivery provenance,
 not evidence of zero delivery or permission to dispense again.
 
-The future dispensing service must enforce that each allocation's item belongs
-to the event's prescription and that the item and batch reference the same
-medication. These cross-record rules, concurrent per-item delivery limits,
-stock decreases and prescription status transitions are not enforced by these
-foreign keys or the pure balance helper. Redis locks and Prisma transactions
-remain future work. Partial delivery and blocking expired lots were selected.
-The ledger itself adds no
-endpoint, operator identity, expiry filter, stock mutation, or RabbitMQ flow.
+Foreign keys and the pure balance helper do not enforce cross-record medication
+matching, concurrent delivery limits, stock decreases or status transitions.
+The internal service below owns those rules; Redis integration remains pending.
+The ledger itself adds no endpoint, operator identity or RabbitMQ flow.
+
+### Internal transactional dispensing
+
+`PharmacyDispensingService.dispenseItem({ prescriptionId, itemId, quantity,
+eventId })` delivers exactly one requested positive portion or rejects it.
+The caller supplies a UUID event ID (matched as an exact, case-sensitive string)
+and the medication is derived from the stored prescription item. Under the
+operating contract that all deliveries are recorded in NINA, an empty `ISSUED`
+ledger is complete zero history. Unknown imported history requires reconciliation;
+there is no implicit import or backfill. New terminal-state deliveries reject.
+
+A ReadCommitted Prisma transaction locks the prescription, validates complete
+history across all its items, and locks medication batches in deterministic ID
+order. Expiry is evaluated after acquiring batch locks. Conditional stock
+decrements, event/allocations and prescription status commit together: partial
+delivery stays `ISSUED`, and completion of every item becomes `DISPENSED`.
+Prescription and batch row locks, not a Redis lease, own database serialization.
+
+An exact successful event replay is allowed before terminal-state rejection and
+returns recorded allocations without writes. Reusing an event ID for a different
+prescription, item or quantity rejects; a concurrent global ID collision escapes
+the transaction without blind retry. No historical balance snapshot is invented.
+Mock tests verify orchestration and failure propagation, not PostgreSQL rollback
+or concurrency. Isolated database proof, Redis wrapper, module registration and
+HTTP endpoints remain pending; this service is not yet exposed by the application.
 
 ### Calendar-date batch expiry
 
@@ -99,7 +120,8 @@ dates. Records belonging to other valid medication IDs are ignored without
 examining their remaining fields. IDs are matched exactly, not trimmed or normalized.
 Results preserve input order and clone dates; `allocateStock` handles chronological
 ordering, ordinal-ID ties and insufficient-stock rejection. No stock is mutated.
-Database/service integration and transactional eligibility checks remain pending.
+The internal service composes this projection inside its locked transaction;
+isolated runtime verification and application integration remain pending.
 
 ### Isolated PostgreSQL 15 ledger proof
 
