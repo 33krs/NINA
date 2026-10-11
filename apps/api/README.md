@@ -112,6 +112,18 @@ and actual Redis runtime proof remain pending. Dependency-double tests are not
 live Redis evidence. PostgreSQL row locks, stock checks and event uniqueness remain
 the correctness authority if a transaction outlives its Redis lease.
 
+### Redis private proof reader (unwired)
+
+`verify-pharmacy-redis-proof.cjs` is an import-only private-file contract. It
+requires owned canonical0700/0600 paths, exact authentication/persistence bytes,
+run identity and a canonical credential-bearing loopback URL. Diagnostics omit
+rejected values; configuration stays private. The shared test fixture creates only
+synthetic private files, without discovering or accessing services.
+
+This reader does not validate Docker observations or authorize a Redis connection.
+Docker identity/mount/network guards, actual adapter/lease scenarios and disposable
+orchestration/cleanup remain pending. Passing fixture tests is not live Redis proof.
+
 ### Calendar-date batch expiry
 
 `isBatchExpired(expirationLabel, evaluationInstant)` is a pure policy helper.
