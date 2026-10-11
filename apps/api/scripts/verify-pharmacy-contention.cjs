@@ -2,6 +2,15 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { setTimeout: pause } = require('node:timers/promises');
 
+function assertPrescriptionCollision(error) {
+  // Resolve lazily: the guarded child binds the actual isolated module before this call.
+  const { Prisma } = require('@prisma/client');
+  assert.ok(error instanceof Prisma.PrismaClientKnownRequestError);
+  assert.equal(error.code, 'P2002');
+  assert.equal(error.meta?.modelName, 'PrescriptionDispensing');
+  assert.deepEqual(error.meta?.target, ['id']);
+}
+
 function observedWaiters(rows, identities, table) {
   if (!['Prescription', 'Batch'].includes(table)) return false;
   const byPid = new Map(rows.map((row) => [row.pid, row]));
@@ -302,6 +311,137 @@ async function verifyContention(db, context) {
     /^Insufficient stock$/,
     'DISPENSED',
   );
+  await verifyIdempotency(db, context);
 }
 
-module.exports = { observedWaiters, verifyContention };
+async function idempotencyState(db, requests, batchId) {
+  const prescriptionIds = [
+    ...new Set(requests.map(({ prescriptionId }) => prescriptionId)),
+  ];
+  return {
+    batch: await db.batch.findUniqueOrThrow({ where: { id: batchId } }),
+    prescriptions: await db.prescription.findMany({
+      where: { id: { in: prescriptionIds } },
+      include: { items: true },
+      orderBy: { id: 'asc' },
+    }),
+    events: await db.prescriptionDispensing.findMany({
+      where: { prescriptionId: { in: prescriptionIds } },
+      include: { allocations: true },
+      orderBy: { id: 'asc' },
+    }),
+    allocations: await db.prescriptionDispensingAllocation.findMany({
+      where: {
+        prescriptionItemId: { in: requests.map(({ itemId }) => itemId) },
+      },
+      orderBy: { id: 'asc' },
+    }),
+  };
+}
+
+async function assertCommittedPortion(db, requests, name, before, winner) {
+  const after = await idempotencyState(db, requests, name);
+  assert.deepEqual(after.batch, {
+    ...before.batch,
+    stock: before.batch.stock - 4,
+  });
+  assert.deepEqual(
+    after.prescriptions,
+    before.prescriptions.map((prescription) => ({
+      ...prescription,
+      status:
+        prescription.id === requests[winner].prescriptionId
+          ? 'DISPENSED'
+          : prescription.status,
+    })),
+  );
+  assert.equal(after.events.length, 1);
+  assert.equal(after.events[0].id, requests[winner].eventId);
+  assert.equal(after.events[0].prescriptionId, requests[winner].prescriptionId);
+  assert.equal(after.allocations.length, 1);
+  assert.deepEqual(after.events[0].allocations, after.allocations);
+  assert.equal(after.allocations[0].dispensingId, requests[winner].eventId);
+  assert.equal(
+    after.allocations[0].prescriptionItemId,
+    requests[winner].itemId,
+  );
+  assert.equal(after.allocations[0].batchId, name);
+  assert.equal(after.allocations[0].quantity, 4);
+}
+
+async function verifyIdempotency(db, context) {
+  const replay = await fixture(db, 'contention-replay', 8, [4]);
+  replay.push({ ...replay[0] });
+  const beforeReplay = await idempotencyState(db, replay, 'contention-replay');
+  assert.deepEqual(beforeReplay.events, []);
+  assert.deepEqual(beforeReplay.allocations, []);
+  const replayResults = await race(
+    context,
+    'Prescription',
+    replay[0].prescriptionId,
+    replay,
+  );
+  for (const result of replayResults) {
+    assert.equal(result.status, 'fulfilled');
+    assert.deepEqual(result.value, {
+      eventId: replay[0].eventId,
+      allocations: [{ batchId: 'contention-replay', quantity: 4 }],
+    });
+  }
+  assert.deepEqual(replayResults[0].value, replayResults[1].value);
+  await assertCommittedPortion(
+    db,
+    replay,
+    'contention-replay',
+    beforeReplay,
+    0,
+  );
+
+  const collision = await fixture(db, 'contention-collision', 12, [4, 4]);
+  collision[1].eventId = collision[0].eventId;
+  assert.equal(
+    await db.prescriptionDispensing.findUnique({
+      where: { id: collision[0].eventId },
+    }),
+    null,
+  );
+  const beforeCollision = await idempotencyState(
+    db,
+    collision,
+    'contention-collision',
+  );
+  assert.deepEqual(beforeCollision.events, []);
+  assert.deepEqual(beforeCollision.allocations, []);
+  // Both observed Batch waits occur after absent replay lookups, before either event insert.
+  const results = await race(
+    context,
+    'Batch',
+    'contention-collision',
+    collision,
+  );
+  assert.equal(
+    results.filter(({ status }) => status === 'fulfilled').length,
+    1,
+  );
+  assert.equal(results.filter(({ status }) => status === 'rejected').length, 1);
+  const winner = results.findIndex(({ status }) => status === 'fulfilled');
+  const error = results[1 - winner].reason;
+  assertPrescriptionCollision(error);
+  assert.deepEqual(results[winner].value, {
+    eventId: collision[winner].eventId,
+    allocations: [{ batchId: 'contention-collision', quantity: 4 }],
+  });
+  await assertCommittedPortion(
+    db,
+    collision,
+    'contention-collision',
+    beforeCollision,
+    winner,
+  );
+}
+
+module.exports = {
+  observedWaiters,
+  verifyContention,
+  assertPrescriptionCollision,
+};
