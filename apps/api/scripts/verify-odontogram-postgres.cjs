@@ -199,8 +199,10 @@ function parseSuite(args) {
   if (args.length === 0) return 'odontogram';
   if (args.length === 1 && args[0] === '--suite=pharmacy-ledger')
     return 'pharmacy-ledger';
+  if (args.length === 1 && args[0] === '--suite=pharmacy-dispensing')
+    return 'pharmacy-dispensing';
   throw new Error(
-    'Unsupported arguments: use no arguments or --suite=pharmacy-ledger',
+    'Unsupported arguments: use no arguments, --suite=pharmacy-ledger or --suite=pharmacy-dispensing',
   );
 }
 
@@ -567,7 +569,7 @@ function copyMigrationStage(
   for (const name of fs.readdirSync(path.join(source, 'migrations')).sort()) {
     if (name === 'migration_lock.toml') continue;
     const omitted =
-      suite === 'pharmacy-ledger'
+      suite !== 'odontogram'
         ? '20261010140000_add_prescription_dispensing'
         : '20261010130000_add_odontogram_history';
     if (!includeHistory && name === omitted) continue;
@@ -581,7 +583,7 @@ function copyMigrationStage(
 }
 
 function proofAuth(suite) {
-  return suite === 'pharmacy-ledger' ? 'isolated-scram' : 'isolated-trust';
+  return suite !== 'odontogram' ? 'isolated-scram' : 'isolated-trust';
 }
 
 function assertProof(proof) {
@@ -595,7 +597,8 @@ function assertProof(proof) {
 
 async function main() {
   const suite = parseSuite(process.argv.slice(2));
-  const pharmacy = suite === 'pharmacy-ledger';
+  const dispensing = suite === 'pharmacy-dispensing';
+  const pharmacy = suite !== 'odontogram';
   const apiRoot = path.resolve(__dirname, '..');
   const runId = crypto.randomUUID();
   const name = `nina-odontogram-pg15-${runId.slice(0, 12)}`;
@@ -794,6 +797,7 @@ async function main() {
     assert.equal(network.Labels?.[RUN_LABEL], runId);
     assert.deepEqual(Object.keys(network.Containers ?? {}), [containerId]);
     const proof = {
+      suite,
       owner: OWNER_VALUE,
       runId,
       containerId,
@@ -863,7 +867,7 @@ async function main() {
       proofFile,
     });
     const schema = copyMigrationStage(apiRoot, tempRoot, false, suite);
-    if (!pharmacy)
+    if (!pharmacy || dispensing)
       isolatedEnv.NINA_ODONTOGRAM_PG15_PRISMA_CLIENT = prepareIsolatedClient(
         schema,
         tempRoot,
@@ -888,7 +892,7 @@ async function main() {
           stage,
         },
       );
-    if (!pharmacy)
+    if (!pharmacy || dispensing)
       await run(process.execPath, [prismaCli, 'generate', '--schema', schema], {
         cwd: tempRoot,
         env: isolatedEnv,
@@ -896,6 +900,7 @@ async function main() {
         stage: 'prisma-generate',
         guard,
         signal: cancellation.signal,
+        redactions,
       });
     await migrate('migrate-predecessors');
     const psql = (sql) =>
@@ -925,6 +930,27 @@ async function main() {
         't',
         'all host authentication rules must use SCRAM',
       );
+      if (dispensing) {
+        copyMigrationStage(apiRoot, tempRoot, true, suite);
+        await migrate('migrate-history');
+        const output = await run(
+          process.execPath,
+          [path.join(__dirname, 'verify-pharmacy-dispensing.cjs')],
+          {
+            ...commandOptions,
+            cwd: tempRoot,
+            env: { ...isolatedEnv, NINA_PHARMACY_DISPENSING_PG15: '1' },
+            timeout: timeoutFor('jest'),
+          },
+        );
+        assert.equal(
+          output,
+          'PHARMACY_SERVICE_BASELINE_PASSED deliveries=3 expiry_rejections=1',
+        );
+        console.log(output);
+        passed = true;
+        return;
+      }
       const {
         seedLegacy,
         verifyLedger,

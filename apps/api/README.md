@@ -125,6 +125,21 @@ isolated runtime verification and application integration remain pending.
 
 ### Isolated PostgreSQL 15 ledger proof
 
+For the real internal service baseline, run
+`npm run test:pharmacy:dispensing:postgres --workspace=@nina/api`. It builds first
+and selects a separate authenticated `pharmacy-dispensing` mode using the same
+owned-resource lifecycle. A guarded child rechecks private proof/client paths,
+datasource binding, exact resource labels/image/loopback mapping and sole network
+membership before constructing real temporary Prisma clients. Direct and
+transitive service imports bind only to that isolated generated client.
+
+The baseline calls the actual compiled service for three requested portions,
+checks partial/full status across two items and exact stock/history, and rejects
+expired-only stock without mutation. Replay, injected rollback and observable
+contention proofs remain pending. It does not expose an endpoint or use Redis.
+Both existing modes remain available unchanged; never invoke the child directly
+with an ambient datasource or bypass its runner-issued ownership checks.
+
 Run `npm run test:pharmacy:postgres --workspace=@nina/api` with an already-cached
 `postgres:15-alpine` image and local Docker. It reuses the owned-resource runner;
 no arguments still selects the unchanged odontogram suite. Unknown arguments
