@@ -147,6 +147,13 @@ unchanged, with no failed event. Trigger/function cleanup runs in `finally`; the
 absence and a successful retry using the same event ID prove recovery. The printed
 baseline summary remains compatible with the shared runner and is emitted only
 after these extra assertions pass. Observable contention remains pending.
+The import-only contention observer component validates both expected writer
+backend PID/start identities, active row-lock queries and causal blocker paths,
+including peer soft queues. Its unit safety tests reject changed/missing identities,
+unrelated blockers, cycles and incorrect waits. This component is **not wired into
+the runtime suite** and does not yet prove actual PostgreSQL concurrency; the
+real-client gates and serialization scenarios belong to the following slice.
+
 The suite does not expose an endpoint or use Redis.
 Both existing modes remain available unchanged; never invoke the child directly
 with an ambient datasource or bypass its runner-issued ownership checks.
