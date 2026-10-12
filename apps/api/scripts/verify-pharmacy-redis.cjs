@@ -21,6 +21,7 @@ const {
 } = require('./pharmacy-redis-resources.cjs');
 const CHILD_PASS =
   'PHARMACY_REDIS_SCENARIOS_PASSED redis_major=7 lease_ms=10000';
+const OUTPUT_CONTRACT_FAILURE = Symbol('scenario output contract failure');
 const SAFE_ERROR_CODES = new Set([
   'EACCES',
   'EADDRINUSE',
@@ -34,19 +35,135 @@ const SAFE_ERROR_CODES = new Set([
   'EPERM',
   'ETIMEDOUT',
 ]);
+const SAFE_CHILD_PHASES = new Set([
+  'proof_read',
+  'container_inspect',
+  'network_inspect',
+  'proof_validate',
+  'adapter_load',
+  'client_setup',
+  'lease',
+  'cleanup',
+]);
+const SAFE_CHILD_CHECKPOINTS = new Set([
+  'proof_input',
+  'container_inspect',
+  'network_inspect',
+  'proof_validation',
+  'adapter_resolution',
+  'client_setup',
+  'lease',
+  'client_cleanup',
+  'client_connect',
+  'command_options',
+  'redis_version',
+  'owner_tokens',
+  'fresh_key',
+  'first_acquire',
+  'competing_acquire',
+  'initial_owner',
+  'first_lease_ttl',
+  'wrong_owner_release',
+  'owner_after_wrong_release',
+  'owner_release',
+  'key_after_owner_release',
+  'natural_acquire',
+  'natural_deadline',
+  'natural_ttl',
+  'natural_owner',
+  'natural_expiry_duration',
+  'successor_acquire',
+  'stale_owner_release',
+  'successor_after_stale_release',
+  'successor_release',
+  'key_after_successor_release',
+]);
+const SAFE_CHILD_CATEGORIES = new Set([
+  'assertion_failed',
+  'operation_failed',
+  'cleanup_failed',
+]);
+const SAFE_CHILD_VALUES = new Set([
+  'redis7',
+  'other_version',
+  'missing',
+  'occupied',
+  'true',
+  'false',
+  'owner_match',
+  'owner_missing',
+  'owner_other',
+  'owner_match_or_missing',
+  'ttl_below_min',
+  'ttl_in_range',
+  'ttl_expired',
+  'ttl_invalid',
+  'ttl_over_max',
+  'before_deadline',
+  'deadline_reached',
+  'duration_sufficient',
+  'duration_short',
+  'unavailable',
+  'success',
+  'failed',
+  'fulfilled',
+]);
+
+function parseChildDiagnostic(error) {
+  if (typeof error?.stderr !== 'string' || error.stderr.length > 2048)
+    return [];
+  const lines = error.stderr
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith('PHARMACY_REDIS_DIAGNOSTIC '));
+  if (lines.length < 1 || lines.length > 2) return [];
+  const diagnostics = [];
+  for (const line of lines) {
+    const match =
+      /^PHARMACY_REDIS_DIAGNOSTIC phase=([a-z_]+) checkpoint=([a-z_]+) category=([a-z_]+) actual=([a-z0-9_]+) expected=([a-z0-9_]+)$/.exec(
+        line,
+      );
+    if (!match) return [];
+    const [, phase, checkpoint, category, actual, expected] = match;
+    if (
+      !SAFE_CHILD_PHASES.has(phase) ||
+      !SAFE_CHILD_CHECKPOINTS.has(checkpoint) ||
+      !SAFE_CHILD_CATEGORIES.has(category) ||
+      !SAFE_CHILD_VALUES.has(actual) ||
+      !SAFE_CHILD_VALUES.has(expected)
+    )
+      return [];
+    diagnostics.push({ phase, checkpoint, category, actual, expected });
+  }
+  return diagnostics;
+}
 
 function reportStageFailure(stage, error) {
   let reason = 'operation_failed';
-  if (
-    stage === 'scenario_child' &&
-    Number.isInteger(error?.status) &&
-    error.status >= 0 &&
-    error.status <= 255
-  )
-    reason = `child_exit_${error.status}`;
-  else if (SAFE_ERROR_CODES.has(error?.code))
+  let details = '';
+  if (stage === 'scenario_child' && error?.[OUTPUT_CONTRACT_FAILURE]) {
+    reason = 'output_contract';
+    details =
+      ' phase=scenario_child checkpoint=completion_marker category=output_contract actual=unexpected_output expected=success_marker';
+  } else if (stage === 'scenario_child') {
+    const diagnostics = parseChildDiagnostic(error);
+    if (
+      Number.isInteger(error?.status) &&
+      error.status >= 0 &&
+      error.status <= 255
+    )
+      reason = `child_exit_${error.status}`;
+    else if (SAFE_ERROR_CODES.has(error?.code))
+      reason = `node_code_${error.code}`;
+    if (diagnostics.length) {
+      const format = (diagnostic) =>
+        ` phase=${diagnostic.phase} checkpoint=${diagnostic.checkpoint} category=${diagnostic.category} actual=${diagnostic.actual} expected=${diagnostic.expected}`;
+      details = diagnostics.map(format).join(' secondary:');
+    }
+  } else if (SAFE_ERROR_CODES.has(error?.code))
     reason = `node_code_${error.code}`;
-  console.error(`PHARMACY_REDIS_STAGE_FAILED stage=${stage} reason=${reason}`);
+  console.error(
+    `PHARMACY_REDIS_STAGE_FAILED stage=${stage} reason=${reason}${details}`,
+  );
 }
 
 async function waitForRedis(config, cancellation) {
@@ -168,7 +285,11 @@ async function main(args = process.argv.slice(2)) {
         redactions,
       },
     );
-    assert.equal(output, CHILD_PASS, 'Guarded Redis scenarios must complete');
+    if (output !== CHILD_PASS) {
+      const error = Error('Scenario child output contract mismatch');
+      error[OUTPUT_CONTRACT_FAILURE] = true;
+      throw error;
+    }
   } catch (error) {
     reportStageFailure(stage, error);
     failure = Error('Isolated Redis verification failed');
