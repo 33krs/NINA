@@ -124,11 +124,50 @@ describe('training account PostgreSQL recovery foundation', () => {
     assert.throws(() => openRecoveryContext(path.join(first.root, '..')));
   });
 
+  it('opens legacy version-one manifests as empty artifact inventories without adoption', () => {
+    const context = createContext();
+    const legacy = JSON.parse(fs.readFileSync(context.manifestPath, 'utf8'));
+    legacy.version = 1;
+    delete legacy.artifacts;
+    fs.writeFileSync(context.manifestPath, JSON.stringify(legacy), {
+      mode: 0o600,
+    });
+
+    const modulePath =
+      require.resolve('./verify-training-accounts-postgres.cjs');
+    delete require.cache[modulePath];
+    const reopenedModule = require('./verify-training-accounts-postgres.cjs');
+    const reopened = reopenedModule.openRecoveryContext(context.root);
+    const state = reopenedModule.readRecoveryState(reopened);
+    assert.equal(state.version, 2);
+    assert.deepEqual(state.artifacts, { proof_sql: null, postgres_env: null });
+  });
+
+  it('rejects a replaced private manifest before persisting a recovery update', () => {
+    const context = createContext();
+    const original = fs.readFileSync(context.manifestPath);
+    fs.renameSync(
+      context.manifestPath,
+      path.join(context.root, 'manifest-copy'),
+    );
+    fs.writeFileSync(context.manifestPath, original, {
+      mode: 0o600,
+      flag: 'wx',
+    });
+
+    assert.throws(
+      () =>
+        reportFailure(context, 'sql_assertion', new Error('synthetic failure')),
+      /Recovery manifest write failed/,
+    );
+    assert.deepEqual(fs.readFileSync(context.manifestPath), original);
+  });
+
   it('reopens only a valid private recovery manifest', async () => {
     const context = createContext();
     const reopened = openRecoveryContext(context.root);
     assert.equal(reopened.runId, context.runId);
-    assert.equal(readRecoveryState(reopened).version, 1);
+    assert.equal(readRecoveryState(reopened).version, 2);
     assert.throws(() => openRecoveryContext(os.tmpdir()));
     const forged = { ...context };
     assert.throws(() =>

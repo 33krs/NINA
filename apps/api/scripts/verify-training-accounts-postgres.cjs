@@ -12,6 +12,21 @@ const MAX_MANIFEST_BYTES = 16 * 1024;
 const MAX_DIAGNOSTICS = 12;
 const CLEANUP_COMMAND_TIMEOUT_MS = 5_000;
 const RESOURCE_KINDS = ['container', 'network'];
+const ARTIFACTS = Object.freeze({
+  proof_sql: Object.freeze({ filename: 'proof.sql', maxBytes: 16 * 1024 }),
+  postgres_env: Object.freeze({ filename: 'postgres.env', maxBytes: 4 * 1024 }),
+});
+const MANIFEST_V1_KEYS = Object.freeze([
+  'version',
+  'runId',
+  'name',
+  'imageId',
+  'container',
+  'network',
+  'proofSucceeded',
+  'cleanupConfirmed',
+  'diagnostics',
+]);
 const STAGES = new Set([
   'image_inspect',
   'network_create',
@@ -105,9 +120,13 @@ function resourceState() {
   return { id: null, uncertain: false, absent: true };
 }
 
+function emptyArtifactState() {
+  return { proof_sql: null, postgres_env: null };
+}
+
 function makeManifest(runId, name) {
   return {
-    version: 1,
+    version: 2,
     runId,
     name,
     imageId: null,
@@ -116,6 +135,7 @@ function makeManifest(runId, name) {
     proofSucceeded: false,
     cleanupConfirmed: false,
     diagnostics: [],
+    artifacts: emptyArtifactState(),
   };
 }
 
@@ -148,6 +168,26 @@ function writeManifest(state) {
   );
   let descriptor;
   try {
+    if (state.manifestIdentity) {
+      const current = fs.lstatSync(state.manifestPath);
+      if (
+        current.isSymbolicLink() ||
+        !current.isFile() ||
+        current.nlink !== 1 ||
+        current.dev !== state.manifestIdentity.dev ||
+        current.ino !== state.manifestIdentity.ino ||
+        (current.mode & 0o777) !== 0o600 ||
+        (currentUid() !== undefined && current.uid !== currentUid())
+      )
+        fail('Private recovery manifest identity changed');
+    }
+    if (state.manifest.version === 1) {
+      state.manifest = {
+        ...state.manifest,
+        version: 2,
+        artifacts: emptyArtifactState(),
+      };
+    }
     const bytes = JSON.stringify(state.manifest);
     if (Buffer.byteLength(bytes, 'utf8') > MAX_MANIFEST_BYTES)
       fail('Recovery manifest exceeds its size limit');
@@ -157,6 +197,19 @@ function writeManifest(state) {
     fs.closeSync(descriptor);
     descriptor = undefined;
     fs.renameSync(temporary, state.manifestPath);
+    const manifestStat = fs.lstatSync(state.manifestPath);
+    if (
+      manifestStat.isSymbolicLink() ||
+      !manifestStat.isFile() ||
+      manifestStat.nlink !== 1 ||
+      (manifestStat.mode & 0o777) !== 0o600 ||
+      (currentUid() !== undefined && manifestStat.uid !== currentUid())
+    )
+      fail('Private recovery manifest required');
+    state.manifestIdentity = {
+      dev: manifestStat.dev,
+      ino: manifestStat.ino,
+    };
     const directory = fs.openSync(state.root, 'r');
     try {
       fs.fsyncSync(directory);
@@ -270,20 +323,15 @@ function validateDiagnostic(value) {
 function validateManifest(value) {
   if (!isPlainObject(value)) return false;
   const keys = Object.keys(value);
+  const manifestVersion =
+    (value.version === 1 &&
+      keys.length === MANIFEST_V1_KEYS.length &&
+      MANIFEST_V1_KEYS.every((key) => keys.includes(key))) ||
+    (value.version === 2 &&
+      keys.length === MANIFEST_V1_KEYS.length + 1 &&
+      [...MANIFEST_V1_KEYS, 'artifacts'].every((key) => keys.includes(key)));
   if (
-    keys.length !== 9 ||
-    ![
-      'version',
-      'runId',
-      'name',
-      'imageId',
-      'container',
-      'network',
-      'proofSucceeded',
-      'cleanupConfirmed',
-      'diagnostics',
-    ].every((key) => keys.includes(key)) ||
-    value.version !== 1 ||
+    !manifestVersion ||
     typeof value.runId !== 'string' ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
       value.runId,
@@ -302,6 +350,15 @@ function validateManifest(value) {
   )
     return false;
   if (
+    value.version === 2 &&
+    (!isPlainObject(value.artifacts) ||
+      Object.keys(value.artifacts).length !== Object.keys(ARTIFACTS).length ||
+      !Object.keys(ARTIFACTS).every((kind) =>
+        validateArtifactState(kind, value.artifacts[kind]),
+      ))
+  )
+    return false;
+  if (
     (value.container.id !== null && value.imageId === null) ||
     (value.cleanupConfirmed &&
       !RESOURCE_KINDS.every(
@@ -312,12 +369,36 @@ function validateManifest(value) {
   return true;
 }
 
+function validateArtifactState(kind, value) {
+  if (value === null) return true;
+  if (
+    !isPlainObject(value) ||
+    Object.keys(value).length !== 4 ||
+    !['state', 'dev', 'ino', 'size'].every((key) => Object.hasOwn(value, key))
+  )
+    return false;
+  if (value.state === 'intent')
+    return value.dev === null && value.ino === null && value.size === null;
+  const maxBytes = ARTIFACTS[kind].maxBytes;
+  return (
+    ['owned', 'complete'].includes(value.state) &&
+    Number.isSafeInteger(value.dev) &&
+    value.dev >= 0 &&
+    Number.isSafeInteger(value.ino) &&
+    value.ino >= 0 &&
+    Number.isInteger(value.size) &&
+    value.size > 0 &&
+    value.size <= maxBytes
+  );
+}
+
 function openRecoveryContext(root) {
   verifyPrivateRoot(root);
   const activeState = activeRoots.get(root);
   if (activeState) return contextFor(activeState);
   const manifestPath = path.join(root, MANIFEST_NAME);
   let manifest;
+  let manifestIdentity;
   try {
     const stat = fs.lstatSync(manifestPath);
     if (
@@ -336,11 +417,15 @@ function openRecoveryContext(root) {
       const opened = fs.fstatSync(descriptor);
       if (
         !opened.isFile() ||
+        opened.nlink !== 1 ||
         (opened.mode & 0o777) !== 0o600 ||
         (currentUid() !== undefined && opened.uid !== currentUid()) ||
-        opened.size > MAX_MANIFEST_BYTES
+        opened.size > MAX_MANIFEST_BYTES ||
+        opened.dev !== stat.dev ||
+        opened.ino !== stat.ino
       )
         fail('Private recovery manifest required');
+      manifestIdentity = { dev: opened.dev, ino: opened.ino };
       manifest = JSON.parse(fs.readFileSync(descriptor, 'utf8'));
     } finally {
       fs.closeSync(descriptor);
@@ -351,10 +436,13 @@ function openRecoveryContext(root) {
   if (!validateManifest(manifest)) fail('Invalid training proof recovery data');
   if (!rootMatchesRunId(root, manifest.runId))
     fail('Recovery directory does not match its run identity');
+  if (manifest.version === 1)
+    manifest = { ...manifest, version: 2, artifacts: emptyArtifactState() };
   const state = {
     root,
     manifestPath,
     manifest,
+    manifestIdentity,
     pending: new Set(),
     finalizing: false,
   };
@@ -689,21 +777,77 @@ async function reconcileOwnedResources(context, { execute } = {}) {
 
 function disposePrivateStorage(state) {
   verifyPrivateRoot(state.root);
+  if (Object.values(state.manifest.artifacts).some(Boolean))
+    fail('Private artifacts are retained in this slice');
+  for (const kind of Object.keys(ARTIFACTS)) {
+    const record = state.manifest.artifacts[kind];
+    if (record && record.state !== 'complete')
+      fail('Private artifact ownership is uncertain');
+    if (record && !validateArtifactState(kind, record))
+      fail('Private artifact identity changed');
+    if (
+      record?.state === 'complete' &&
+      !fs.existsSync(path.join(state.root, ARTIFACTS[kind].filename))
+    )
+      fail('Private artifact identity changed');
+  }
   const entries = fs.readdirSync(state.root);
+  const validated = [];
   for (const name of entries) {
-    if (name !== MANIFEST_NAME && !/^\.manifest-[0-9a-f-]{36}\.tmp$/.test(name))
+    const artifactKind = Object.keys(ARTIFACTS).find(
+      (kind) => ARTIFACTS[kind].filename === name,
+    );
+    if (name !== MANIFEST_NAME && !artifactKind)
       fail('Unexpected recovery storage entry');
     const target = path.join(state.root, name);
     const stat = fs.lstatSync(target);
     if (
       stat.isSymbolicLink() ||
       !stat.isFile() ||
+      stat.nlink !== 1 ||
       (stat.mode & 0o777) !== 0o600 ||
       (currentUid() !== undefined && stat.uid !== currentUid())
     )
       fail('Private recovery file required');
+    if (name === MANIFEST_NAME) {
+      if (
+        !state.manifestIdentity ||
+        stat.dev !== state.manifestIdentity.dev ||
+        stat.ino !== state.manifestIdentity.ino
+      )
+        fail('Private recovery manifest identity changed');
+    } else {
+      const record = state.manifest.artifacts[artifactKind];
+      if (
+        !record ||
+        record.state !== 'complete' ||
+        stat.dev !== record.dev ||
+        stat.ino !== record.ino ||
+        stat.size !== record.size ||
+        stat.size > ARTIFACTS[artifactKind].maxBytes
+      )
+        fail('Private artifact identity changed');
+    }
+    validated.push({ name, dev: stat.dev, ino: stat.ino });
   }
-  for (const name of entries) fs.unlinkSync(path.join(state.root, name));
+  validated.sort(
+    (left, right) =>
+      Number(left.name === MANIFEST_NAME) -
+      Number(right.name === MANIFEST_NAME),
+  );
+  for (const { name, dev, ino } of validated) {
+    const target = path.join(state.root, name);
+    const current = fs.lstatSync(target);
+    if (
+      current.isSymbolicLink() ||
+      !current.isFile() ||
+      current.nlink !== 1 ||
+      current.dev !== dev ||
+      current.ino !== ino
+    )
+      fail('Private recovery inventory changed');
+    fs.unlinkSync(target);
+  }
   fs.rmdirSync(state.root);
   activeRoots.delete(state.root);
 }
