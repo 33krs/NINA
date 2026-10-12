@@ -44,7 +44,15 @@ function load(state) {
           state.clients.forEach((client) => {
             client.isOpen = true;
           });
+          if (state.diagnostic) context.onDiagnostic(state.diagnostic);
           if (state.fault === 'scenario') throw Error('fixture scenario');
+        },
+      };
+    if (id === './verify-pharmacy-redis-proof.cjs')
+      return {
+        readRedisProof() {
+          if (Object.hasOwn(state, 'proofFailure')) throw state.proofFailure;
+          return require(id).readRedisProof(state.input);
         },
       };
     if (id === 'node:fs')
@@ -60,7 +68,10 @@ function load(state) {
     module,
     __dirname,
     process,
-    console: { log: (line) => (state.summary = line) },
+    console: {
+      log: (line) => (state.summary = line),
+      error: (line) => (state.diagnostics ??= []).push(line),
+    },
     URL,
   });
   return module.exports;
@@ -68,12 +79,19 @@ function load(state) {
 
 test('actual inspection identity must reject before loading the compiled adapter', async (t) => {
   const f = privateRedisFixture(t);
-  const state = { loads: 0, calls: [] };
+  const state = { loads: 0, calls: [], input: f.input };
   await assert.rejects(
     load(state).main(f.input),
     /Redis container identity mismatch/,
   );
   assert.equal(state.loads, 0);
+  assert.deepEqual(state.diagnostics, [
+    'PHARMACY_REDIS_DIAGNOSTIC phase=proof_validate checkpoint=proof_validation category=operation_failed actual=unavailable expected=success',
+  ]);
+  assert.doesNotMatch(
+    state.diagnostics.join('\n'),
+    new RegExp(f.proof.containerId),
+  );
 });
 
 function observations(f) {
@@ -144,6 +162,7 @@ function scenario(t, fault) {
     clients: [],
     observations: observations(f),
     runId: f.proof.runId,
+    input: f.input,
     leaseCalls: 0,
     fault,
   };
@@ -227,6 +246,103 @@ for (const [fault, message] of [
       assert.ok(state.clients.every((client) => client.destroyed));
     assert.equal(state.summary, undefined);
   });
+
+test('scenario failure reports a fixed lease phase without leaking raw errors or proof data', async (t) => {
+  const { f, state, main } = scenario(t, 'scenario');
+  await assert.rejects(main(f.input), /fixture scenario/);
+  assert.deepEqual(state.diagnostics, [
+    'PHARMACY_REDIS_DIAGNOSTIC phase=lease checkpoint=lease category=operation_failed actual=unavailable expected=success',
+  ]);
+  assert.doesNotMatch(
+    state.diagnostics.join('\n'),
+    new RegExp(`fixture scenario|${f.password}|${f.proof.redisUrl}`),
+  );
+});
+
+for (const thrown of [undefined, null, false, 0, ''])
+  test(`preserves a falsy proof-read failure (${String(thrown)})`, async (t) => {
+    const f = privateRedisFixture(t);
+    const state = { loads: 0, calls: [], input: f.input, proofFailure: thrown };
+    let result;
+    try {
+      await load(state).main(f.input);
+      result = { fulfilled: true };
+    } catch (error) {
+      result = { fulfilled: false, error };
+    }
+    assert.equal(result.fulfilled, false);
+    assert.ok(Object.is(result.error, thrown));
+    assert.equal(state.summary, undefined);
+    assert.deepEqual(state.diagnostics, [
+      'PHARMACY_REDIS_DIAGNOSTIC phase=proof_read checkpoint=proof_input category=operation_failed actual=unavailable expected=success',
+    ]);
+  });
+
+test('diagnostic fields are snapshotted once before safe output', async (t) => {
+  const { f, state, main } = scenario(t);
+  const reads = new Map();
+  const diagnostic = Object.fromEntries(
+    ['phase', 'checkpoint', 'category', 'actual', 'expected'].map((field) => [
+      field,
+      {
+        get() {
+          const count = (reads.get(field) ?? 0) + 1;
+          reads.set(field, count);
+          return count === 1
+            ? {
+                phase: 'lease',
+                checkpoint: 'lease',
+                category: 'operation_failed',
+                actual: 'failed',
+                expected: 'success',
+              }[field]
+            : 'SYNTHETIC_SECRET_SENTINEL';
+        },
+      },
+    ]),
+  );
+  state.diagnostic = Object.defineProperties({}, diagnostic);
+
+  await main(f.input);
+
+  assert.deepEqual([...reads.values()], [1, 1, 1, 1, 1]);
+  assert.deepEqual(state.diagnostics, [
+    'PHARMACY_REDIS_DIAGNOSTIC phase=lease checkpoint=lease category=operation_failed actual=failed expected=success',
+  ]);
+  assert.doesNotMatch(
+    state.diagnostics.join('\n'),
+    /SYNTHETIC_SECRET_SENTINEL/,
+  );
+});
+
+test('throwing diagnostic getters are contained without leaking getter errors', async (t) => {
+  const { f, state, main } = scenario(t);
+  state.diagnostic = Object.defineProperty({}, 'phase', {
+    get() {
+      throw Error('SYNTHETIC_GETTER_SECRET');
+    },
+  });
+
+  await main(f.input);
+
+  assert.equal(state.diagnostics, undefined);
+  assert.equal(
+    state.summary,
+    'PHARMACY_REDIS_SCENARIOS_PASSED redis_major=7 lease_ms=10000',
+  );
+});
+
+test('client cleanup failure reports a fixed cleanup phase', async (t) => {
+  const { f, state, main } = scenario(t, 'cleanup');
+  await assert.rejects(main(f.input), /Owned client cleanup/);
+  assert.deepEqual(state.diagnostics, [
+    'PHARMACY_REDIS_DIAGNOSTIC phase=cleanup checkpoint=client_cleanup category=cleanup_failed actual=failed expected=fulfilled',
+  ]);
+  assert.doesNotMatch(
+    state.diagnostics.join('\n'),
+    new RegExp(`fixture cleanup|${f.password}|${f.proof.redisUrl}`),
+  );
+});
 
 for (const kind of [
   'private',
