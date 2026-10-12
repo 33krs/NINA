@@ -359,3 +359,12 @@ This proves migration constraints, not cross-medication/prescription matching,
 expiry eligibility, service transactions, concurrency or administrator resistance.
 The existing deterministic helper tests and offline Prisma checks remain useful;
 run the isolated command before claiming live database proof.
+
+## Fixed training-account migration reader
+
+`scripts/training-accounts-postgres-fixture.cjs` exposes an import-only
+`readTrainingAccountMigration()` helper. It reads only the fixed, bounded
+training-account migration after canonical-path, regular-file, no-link,
+identity, and UTF-8 checks; it accepts no caller-selected path and performs no
+process, environment, database, or service work. Its synthetic filesystem tests
+do not establish PostgreSQL runtime behavior.
