@@ -59,7 +59,16 @@ requires successful proof and confirmed cleanup. Cleanup executor calls receive
 a fixed five-second bound and no proof-abort signal. Its tests use synthetic
 executors only; they do not connect to PostgreSQL or invoke Docker.
 
-The recovery manifest uses a strict version-two schema; supported version-one manifests reopen as an empty artifact inventory. Existing private-file roots and manifest identities are rechecked before updates and cleanup.
+The helper also accepts only the fixed `proof_sql` and `postgres_env` artifact
+kinds, stored as `proof.sql` and `postgres.env` inside its factory-owned private
+root. Content is bounded, written once to exclusive mode-0600 files, and never
+copied into the metadata-only recovery manifest. The manifest records intent
+before file creation and the created file's device/inode before content is
+written; ambiguous writes, legacy unregistered files, replacements, links, or
+foreign inventory retain recovery evidence. Version-one manifests reopen with
+an empty artifact inventory and never adopt files by name. Successful proof and cleanup intentionally retain artifacts until the separate
+identity-checked disposal unit lands. No cross-process concurrency guarantee is made; this lifecycle does not read environment values
+or create credentials, and its tests use synthetic content only.
 
 Run the ordinary API checks with `npm --workspace @nina/api test` and
 `npm --workspace @nina/api run lint`.
