@@ -2,9 +2,13 @@
 
 ## Local account password hashing foundation (not exposed)
 
-The auth module currently provides only the reusable password hash/verify
-foundation; it does not create accounts, add a database schema, or authenticate
-API routes. Password inputs must contain 15–128 Unicode code points and no more
+The auth module provides a reusable password hash/verify foundation and an
+unexposed account-schema foundation; it does not create account-management or
+authentication routes. Accounts are NINA-managed with administrator-only
+creation. The initial release is limited to fictitious patients. Roles are
+explicitly assigned as `ADMIN`, `INSTRUCTOR`, or `STUDENT`; no administrator
+clinical access, instructor-wide case access, or clinical identity linkage is
+implied. Password inputs must contain 15–128 Unicode code points and no more
 than 1,024 UTF-8 bytes. Inputs are used exactly as supplied: whitespace is not
 trimmed and Unicode is not normalized.
 Ill-formed UTF-16 surrogate sequences are rejected; valid paired Unicode is
@@ -21,6 +25,15 @@ passwords and stored hashes must not be logged.
 This uses OWASP's documented scrypt alternative; OWASP prefers Argon2id for new
 systems. See the [Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
 and [Node.js `crypto.scrypt`](https://nodejs.org/api/crypto.html#cryptoscryptpassword-salt-keylen-options-callback).
+
+Usernames are trimmed only at their outer whitespace and canonicalized to
+lowercase ASCII; accepted names are 3–32 characters using letters, digits,
+periods, underscores, or hyphens, and must start with a letter or digit. The
+additive migration enforces the canonical form and nonnegative `authVersion`
+with SQL checks that Prisma's schema DSL cannot represent. It has not been
+applied to any database. No account rows, default credentials, or administrator
+are seeded. `authVersion` is only groundwork for future revocation; no session
+or authentication behavior is implemented here.
 
 Run the ordinary API checks with `npm --workspace @nina/api test` and
 `npm --workspace @nina/api run lint`.

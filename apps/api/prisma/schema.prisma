@@ -7,6 +7,23 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum UserRole {
+  ADMIN
+  INSTRUCTOR
+  STUDENT
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  username     String   @unique @db.VarChar(32)
+  passwordHash String
+  role         UserRole
+  isActive     Boolean  @default(true)
+  authVersion  Int      @default(0)
+  createdAt    DateTime @default(now()) @db.Timestamp(3)
+  updatedAt    DateTime @updatedAt @db.Timestamp(3)
+}
+
 // ==========================================
 // Clinical Module (FHIR-inspired)
 // ==========================================
