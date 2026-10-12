@@ -902,14 +902,6 @@ async function reconcileOwnedResources(context, { execute } = {}) {
 
 function disposePrivateStorage(state) {
   verifyPrivateRoot(state.root);
-  const currentEntries = fs.readdirSync(state.root);
-  if (
-    Object.values(state.manifest.artifacts).some(Boolean) ||
-    currentEntries.some((name) =>
-      Object.values(ARTIFACTS).some((artifact) => artifact.filename === name),
-    )
-  )
-    fail('Private artifacts are retained until disposal is integrated');
   for (const kind of Object.keys(ARTIFACTS)) {
     const record = state.manifest.artifacts[kind];
     if (record && record.state !== 'complete')
