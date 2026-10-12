@@ -21,6 +21,33 @@ const {
 } = require('./pharmacy-redis-resources.cjs');
 const CHILD_PASS =
   'PHARMACY_REDIS_SCENARIOS_PASSED redis_major=7 lease_ms=10000';
+const SAFE_ERROR_CODES = new Set([
+  'EACCES',
+  'EADDRINUSE',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EEXIST',
+  'EPIPE',
+  'ENOBUFS',
+  'ENOENT',
+  'ENOSPC',
+  'EPERM',
+  'ETIMEDOUT',
+]);
+
+function reportStageFailure(stage, error) {
+  let reason = 'operation_failed';
+  if (
+    stage === 'scenario_child' &&
+    Number.isInteger(error?.status) &&
+    error.status >= 0 &&
+    error.status <= 255
+  )
+    reason = `child_exit_${error.status}`;
+  else if (SAFE_ERROR_CODES.has(error?.code))
+    reason = `node_code_${error.code}`;
+  console.error(`PHARMACY_REDIS_STAGE_FAILED stage=${stage} reason=${reason}`);
+}
 
 async function waitForRedis(config, cancellation) {
   const adapter = path.resolve(
@@ -56,14 +83,19 @@ async function waitForRedis(config, cancellation) {
 }
 
 async function main(args = process.argv.slice(2)) {
-  assert.ok(
-    args.length === 1 && args[0] === '--isolated',
-    'Explicit isolated Redis opt-in required',
-  );
-  assert.ok(
-    typeof process.getuid === 'function' && process.getuid() > 0,
-    'Unprivileged Unix runner required',
-  );
+  try {
+    assert.ok(
+      args.length === 1 && args[0] === '--isolated',
+      'Explicit isolated Redis opt-in required',
+    );
+    assert.ok(
+      typeof process.getuid === 'function' && process.getuid() > 0,
+      'Unprivileged Unix runner required',
+    );
+  } catch (error) {
+    reportStageFailure('preflight', error);
+    throw error;
+  }
   const fixture = createRedisFixture();
   const { root, runId, redactions, environment } = fixture;
   const cancellation = createCancellation();
@@ -84,6 +116,7 @@ async function main(args = process.argv.slice(2)) {
   let networkId;
   let containerId;
   let failure;
+  let stage = 'image_inspect';
   try {
     assert.equal(
       await docker(['image', 'inspect', '--format', '{{.Id}}', IMAGE]),
@@ -92,14 +125,19 @@ async function main(args = process.argv.slice(2)) {
     );
     tracker = createResourceTracker({ runId, imageId: IMAGE_ID, root });
     cancellation.throwIfCancelled();
+    stage = 'network_create';
     networkId = await captureCreation(tracker, 'network', () =>
       docker(fixture.networkArgs()),
     );
+    stage = 'container_create';
     containerId = await captureCreation(tracker, 'container', () =>
       docker(fixture.containerArgs()),
     );
+    stage = 'container_start';
     await docker(['start', containerId]);
+    stage = 'proof_write';
     const input = fixture.writeProof(containerId, networkId);
+    stage = 'proof_validation';
     const inspect = async (args) => {
       const rows = JSON.parse(await docker(args));
       assert.ok(
@@ -112,7 +150,9 @@ async function main(args = process.argv.slice(2)) {
       container: await inspect(['inspect', '--type', 'container', containerId]),
       network: await inspect(['network', 'inspect', networkId]),
     });
+    stage = 'redis_readiness';
     await waitForRedis(config, cancellation);
+    stage = 'scenario_child';
     const output = await run(
       process.execPath,
       [
@@ -129,7 +169,8 @@ async function main(args = process.argv.slice(2)) {
       },
     );
     assert.equal(output, CHILD_PASS, 'Guarded Redis scenarios must complete');
-  } catch {
+  } catch (error) {
+    reportStageFailure(stage, error);
     failure = Error('Isolated Redis verification failed');
   } finally {
     clearTimeout(timer);

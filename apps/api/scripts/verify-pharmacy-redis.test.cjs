@@ -96,6 +96,11 @@ for (const args of [[], ['--isolated', 'extra'], ['--url=redis://foreign']])
   test(`rejects non-opted-in arguments before resources: ${JSON.stringify(args)}`, async (t) => {
     const f = load(t);
     await assert.rejects(f.api.main(args), /opt-in/);
+    assert.ok(
+      f.output.includes(
+        'PHARMACY_REDIS_STAGE_FAILED stage=preflight reason=operation_failed',
+      ),
+    );
     assert.equal(f.root, undefined);
     assert.equal(f.calls.length, 0);
   });
@@ -108,7 +113,7 @@ test('privileged runner rejects before allocating private files or commands', as
   assert.equal(f.calls.length, 0);
 });
 
-test('CLI rejects absent opt-in with only a generic failure', () => {
+test('CLI rejects absent opt-in with safe stage context and a generic failure', () => {
   const result = spawnSync(process.execPath, [source], {
     env: { PATH: '/usr/bin:/bin' },
     timeout: 5000,
@@ -116,7 +121,11 @@ test('CLI rejects absent opt-in with only a generic failure', () => {
   });
   assert.equal(result.status, 1);
   assert.equal(result.stdout, '');
-  assert.equal(result.stderr.trim(), 'PHARMACY_REDIS_SUITE_FAILED');
+  assert.equal(
+    result.stderr.trim(),
+    'PHARMACY_REDIS_STAGE_FAILED stage=preflight reason=operation_failed\n' +
+      'PHARMACY_REDIS_SUITE_FAILED',
+  );
 });
 
 for (const options of [
@@ -140,6 +149,28 @@ for (const fail of ['network', 'create', 'start', 'inspect', 'child'])
     assert.ok(f.output.every((line) => !line.includes('SUITE_PASSED')));
   });
 
+for (const [fail, stage] of [
+  ['image', 'image_inspect'],
+  ['network', 'network_create'],
+  ['create', 'container_create'],
+  ['start', 'container_start'],
+  ['inspect', 'proof_validation'],
+  ['child', 'scenario_child'],
+])
+  test(`failure diagnostics identify ${stage} without exposing error details`, async (t) => {
+    const f = load(t, { fail });
+    await assert.rejects(f.api.main(['--isolated']), /verification/);
+    const diagnostic = f.output.find((line) =>
+      line.startsWith('PHARMACY_REDIS_STAGE_FAILED '),
+    );
+    assert.equal(
+      diagnostic,
+      `PHARMACY_REDIS_STAGE_FAILED stage=${stage} reason=operation_failed`,
+    );
+    assert.ok(!f.output.join('\n').includes('synthetic private failure'));
+    if (fail !== 'image') assert.equal(f.events.at(-1), 'cleanup');
+  });
+
 for (const options of [
   { createOutput: 'malformed' },
   { observation: '[]' },
@@ -155,6 +186,11 @@ for (const options of [
 test('bounded readiness failure closes its client and never launches child', async (t) => {
   const f = load(t, { readinessFailure: true });
   await assert.rejects(f.api.main(['--isolated']), /verification/);
+  assert.ok(
+    f.output.includes(
+      'PHARMACY_REDIS_STAGE_FAILED stage=redis_readiness reason=operation_failed',
+    ),
+  );
   assert.equal(f.clients.length, 1);
   assert.ok(f.clients.every((client) => client.destroyed));
   assert.ok(!f.events.includes('child'));
