@@ -1,4 +1,6 @@
 const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
 
 const MAX_RECORD_BYTES = 4096;
 const SAFE_PHASES = new Set([
@@ -212,6 +214,138 @@ function decodeResult(bytes) {
   return snapshot;
 }
 
+function channelError(code, status) {
+  const error = new Error('Redis scenario child did not complete safely');
+  error.code = code;
+  if (Number.isInteger(status) && status >= 0 && status <= 255)
+    error.status = status;
+  return error;
+}
+
+function runScenarioChild({
+  runId,
+  proofFile,
+  env,
+  timeout,
+  signal,
+  guard,
+  spawnImpl = spawn,
+  killProcess = process.kill,
+  platform = process.platform,
+}) {
+  const command = process.execPath;
+  const args = [
+    path.join(__dirname, 'verify-pharmacy-redis-scenarios.cjs'),
+    `--run-id=${runId}`,
+    `--proof-file=${proofFile}`,
+  ];
+  if (!Number.isInteger(timeout) || timeout <= 0)
+    return Promise.reject(channelError('EINVAL'));
+  try {
+    guard?.();
+  } catch {
+    return Promise.reject(channelError('ECANCELED'));
+  }
+  return new Promise((resolve, reject) => {
+    const grouped = platform !== 'win32';
+    let child;
+    try {
+      child = spawnImpl(command, args, {
+        env,
+        detached: grouped,
+        stdio: ['ignore', 'ignore', 'ignore', 'pipe'],
+      });
+    } catch {
+      reject(channelError('ECHILD'));
+      return;
+    }
+    const stream = child.stdio?.[3];
+    let recordBytes = 0;
+    const chunks = [];
+    let failure;
+    let killTimer;
+    let finalKillSent = false;
+    const kill = (terminationSignal) => {
+      try {
+        if (grouped && child.pid) killProcess(-child.pid, terminationSignal);
+        else child.kill(terminationSignal);
+      } catch {
+        // The child close event remains the settlement boundary.
+      }
+    };
+    const stop = (code) => {
+      if (failure) return;
+      failure = channelError(code);
+      kill('SIGTERM');
+      killTimer = setTimeout(() => {
+        finalKillSent = true;
+        kill('SIGKILL');
+      }, 500);
+    };
+    const abort = () => stop('ECANCELED');
+    const timer = setTimeout(() => stop('ETIMEDOUT'), timeout);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (stream)
+      stream.on('data', (chunk) => {
+        recordBytes += chunk.length;
+        if (recordBytes > MAX_RECORD_BYTES) {
+          stop('EPROTO');
+          return;
+        }
+        chunks.push(Buffer.from(chunk));
+      });
+    stream?.once('error', () => stop('EPROTO'));
+    child.once('error', () => {
+      failure ??= channelError('ECHILD');
+    });
+    child.once('close', (status, childSignal) => {
+      clearTimeout(timer);
+      if (killTimer) {
+        clearTimeout(killTimer);
+        if (!finalKillSent) {
+          finalKillSent = true;
+          kill('SIGKILL');
+        }
+      }
+      signal?.removeEventListener('abort', abort);
+      if (failure) {
+        reject(failure);
+        return;
+      }
+      try {
+        guard?.();
+      } catch {
+        reject(channelError('ECANCELED'));
+        return;
+      }
+      if (childSignal !== null || !Number.isInteger(status)) {
+        reject(channelError('ECHILD'));
+        return;
+      }
+      let result;
+      try {
+        result = decodeResult(Buffer.concat(chunks));
+      } catch {
+        reject(channelError('EPROTO', status));
+        return;
+      }
+      if (result.result === 'passed' && status === 0) {
+        resolve(result);
+        return;
+      }
+      if (result.result === 'failed' && status !== 0) {
+        const error = channelError('ECHILD', status);
+        error.diagnostics = result.diagnostics;
+        reject(error);
+        return;
+      }
+      reject(channelError('EPROTO', status));
+    });
+    if (!stream) stop('EPROTO');
+    if (signal?.aborted) abort();
+  });
+}
+
 function writeResult(result, write = (bytes) => fs.writeSync(3, bytes)) {
   try {
     write(encodeResult(result));
@@ -225,6 +359,7 @@ module.exports = {
   MAX_RECORD_BYTES,
   decodeResult,
   encodeResult,
+  runScenarioChild,
   snapshotDiagnostics,
   validateDiagnostics,
   writeResult,
