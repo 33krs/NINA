@@ -1,7 +1,22 @@
+const {
+  readRecoveryState,
+} = require('./verify-training-accounts-postgres.cjs');
+
 const MAX_OBSERVATION_BYTES = 256 * 1024;
+const MAX_NETWORK_OBSERVATION_BYTES = 64 * 1024;
 const IMAGE_TAG = 'postgres:15-alpine';
 const PGDATA = '/var/lib/postgresql/data';
 const ARCHITECTURES = new Set(['amd64', 'arm64']);
+const OWNER_LABEL = 'nina.training-postgres.owner';
+const RUN_LABEL = 'nina.training-postgres.run';
+const OWNER_VALUE = 'nina-suite';
+const ENDPOINT_KEYS = Object.freeze([
+  'Name',
+  'EndpointID',
+  'MacAddress',
+  'IPv4Address',
+  'IPv6Address',
+]);
 
 function rejectObservation() {
   throw new Error('Training-account PostgreSQL image observation rejected');
@@ -83,4 +98,124 @@ function validateTrainingPostgresImage(imageJson, expectedArchitecture) {
   });
 }
 
-module.exports = { validateTrainingPostgresImage };
+function rejectNetworkObservation() {
+  throw new Error('Training-account PostgreSQL network observation rejected');
+}
+
+function exactKeys(value, keys) {
+  if (!isRecord(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return (
+    actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index])
+  );
+}
+
+function validateNetworkMembers(inspection, state, phase) {
+  if (!isRecord(inspection.Containers)) rejectNetworkObservation();
+  const memberIds = Object.keys(inspection.Containers);
+  if (memberIds.length > 64) rejectNetworkObservation();
+
+  const containerId = state.container.id;
+  const containerRegistered =
+    typeof containerId === 'string' && /^[a-f\d]{64}$/.test(containerId);
+  if (
+    typeof state.container.uncertain !== 'boolean' ||
+    typeof state.container.absent !== 'boolean' ||
+    state.container.uncertain ||
+    (containerRegistered && state.container.absent) ||
+    (!containerRegistered && !state.container.absent)
+  )
+    rejectNetworkObservation();
+
+  for (const memberId of memberIds) {
+    const member = inspection.Containers[memberId];
+    if (
+      !/^[a-f\d]{64}$/.test(memberId) ||
+      !exactKeys(member, ENDPOINT_KEYS) ||
+      ENDPOINT_KEYS.some(
+        (key) => typeof member[key] !== 'string' || member[key].length > 256,
+      )
+    )
+      rejectNetworkObservation();
+  }
+
+  if (phase === 'running') {
+    if (
+      !containerRegistered ||
+      memberIds.length !== 1 ||
+      memberIds[0] !== containerId ||
+      inspection.Containers[containerId].Name !== state.name
+    )
+      rejectNetworkObservation();
+  } else if (memberIds.length > 0) {
+    if (
+      !containerRegistered ||
+      memberIds.length !== 1 ||
+      memberIds[0] !== containerId ||
+      inspection.Containers[containerId].Name !== state.name
+    )
+      rejectNetworkObservation();
+  }
+
+  return memberIds.length;
+}
+
+function validateTrainingPostgresNetwork(context, networkJson, phase) {
+  let state;
+  try {
+    state = readRecoveryState(context);
+  } catch {
+    rejectNetworkObservation();
+  }
+  if (
+    typeof networkJson !== 'string' ||
+    Buffer.byteLength(networkJson, 'utf8') > MAX_NETWORK_OBSERVATION_BYTES ||
+    !['created', 'running'].includes(phase) ||
+    !isRecord(state.network) ||
+    !isRecord(state.container) ||
+    typeof state.runId !== 'string' ||
+    typeof state.name !== 'string' ||
+    context.name !== state.name ||
+    state.proofSucceeded !== false ||
+    state.cleanupConfirmed !== false ||
+    typeof state.network.id !== 'string' ||
+    !/^[a-f\d]{64}$/.test(state.network.id) ||
+    state.network.uncertain !== false ||
+    state.network.absent !== false
+  )
+    rejectNetworkObservation();
+
+  let inspection;
+  try {
+    inspection = JSON.parse(networkJson);
+  } catch {
+    rejectNetworkObservation();
+  }
+  if (
+    !isRecord(inspection) ||
+    inspection.Id !== state.network.id ||
+    inspection.Name !== state.name ||
+    inspection.Driver !== 'bridge' ||
+    inspection.Internal !== true ||
+    !exactKeys(inspection.Labels, [OWNER_LABEL, RUN_LABEL]) ||
+    inspection.Labels[OWNER_LABEL] !== OWNER_VALUE ||
+    inspection.Labels[RUN_LABEL] !== state.runId
+  )
+    rejectNetworkObservation();
+
+  const memberCount = validateNetworkMembers(inspection, state, phase);
+  return Object.freeze({
+    name: state.name,
+    phase,
+    driver: 'bridge',
+    internal: true,
+    memberCount,
+  });
+}
+
+module.exports = {
+  validateTrainingPostgresImage,
+  validateTrainingPostgresNetwork,
+};
