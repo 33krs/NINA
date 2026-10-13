@@ -95,6 +95,29 @@ Scrypt work cannot be cancelled once started. Callers must await fixture
 preparation to settle before beginning resource reconciliation or finalization;
 this import-only helper does not establish cross-process concurrency safety.
 
+## Training-account PostgreSQL command planning (import-only)
+
+`scripts/training-accounts-postgres-plan.cjs` produces frozen argument arrays
+for a fixed cached-image inspection, isolated network/container creation,
+readiness check, and SQL assertion command. It accepts only a factory-owned
+recovery context and the matching prepared fixture; it does not execute
+commands or read environment variables. Before planning the bind mount, it
+revalidates both complete private artifacts and their recorded file identities.
+The container plan uses the fixed `postgres:15-alpine` reference only for image
+inspection, then requires the recovery context's bound immutable image ID.
+It requests an internal bridge, no host ports or persistent volumes, a
+read-only root filesystem with bounded temporary filesystems, and a read-only
+SQL bind mount. The entrypoint runs as root so it can initialize PostgreSQL's
+temporary data directory; the assertion command also runs as root to read the
+mode-0600 SQL mount and sets `PGPASSWORD` only inside the container process
+environment. PostgreSQL host authentication is configured by the generated
+fixture for SCRAM. These are planned arguments, not evidence that Docker,
+image availability, mount permissions, initialization, or database assertions
+have succeeded. The container flags follow the [Docker create CLI contract](https://docs.docker.com/reference/cli/docker/container/create/),
+and the root-to-`postgres` initialization behavior comes from the
+[official PostgreSQL image entrypoint](https://github.com/docker-library/postgres/blob/master/docker-entrypoint.sh).
+Synthetic tests inspect the plan without invoking Docker.
+
 Run the ordinary API checks with `npm --workspace @nina/api test` and
 `npm --workspace @nina/api run lint`.
 
