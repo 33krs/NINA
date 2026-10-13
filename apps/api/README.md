@@ -407,3 +407,9 @@ This proves migration constraints, not cross-medication/prescription matching,
 expiry eligibility, service transactions, concurrency or administrator resistance.
 The existing deterministic helper tests and offline Prisma checks remain useful;
 run the isolated command before claiming live database proof.
+
+## Training-account PostgreSQL receipt helpers (import-only)
+
+The receipt helper can emit fixed run-bound SQL checkpoint expressions and parse
+bounded synthetic stdout into frozen metadata. It does not execute SQL or establish
+PostgreSQL/runtime proof; assertion placement and command integration are separate.
