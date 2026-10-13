@@ -6,18 +6,18 @@ const {
 const MAX_OBSERVATION_BYTES = 256 * 1024;
 const MAX_NETWORK_OBSERVATION_BYTES = 64 * 1024;
 const MAX_CONTAINER_OBSERVATION_BYTES = 256 * 1024;
-const PROOF_PATH = '/run/nina-proof/proof.sql';
-const TMPFS = Object.freeze({
-  '/tmp': 'rw,noexec,nosuid,size=16m',
-  '/run/postgresql': 'rw,noexec,nosuid,size=16m',
-  '/var/lib/postgresql/data': 'rw,noexec,nosuid,size=256m',
-});
 const IMAGE_TAG = 'postgres:15-alpine';
 const PGDATA = '/var/lib/postgresql/data';
 const ARCHITECTURES = new Set(['amd64', 'arm64']);
 const OWNER_LABEL = 'nina.training-postgres.owner';
 const RUN_LABEL = 'nina.training-postgres.run';
 const OWNER_VALUE = 'nina-suite';
+const PROOF_PATH = '/run/nina-proof/proof.sql';
+const TMPFS = Object.freeze({
+  '/tmp': 'rw,noexec,nosuid,size=16m',
+  '/run/postgresql': 'rw,noexec,nosuid,size=16m',
+  [PGDATA]: 'rw,noexec,nosuid,size=256m',
+});
 const ENDPOINT_KEYS = Object.freeze([
   'Name',
   'EndpointID',
@@ -223,8 +223,18 @@ function validateTrainingPostgresNetwork(context, networkJson, phase) {
   });
 }
 
+function rejectIsolationObservation() {
+  throw new Error('Training-account PostgreSQL isolation observation rejected');
+}
+
 function rejectMountObservation() {
   throw new Error('Training-account PostgreSQL mount observation rejected');
+}
+
+function noPublishedPorts(value) {
+  if (value === null) return true;
+  if (!isRecord(value) || Object.keys(value).length !== 0) return false;
+  return true;
 }
 
 function validateActualMounts(mounts, proofSql) {
@@ -369,8 +379,168 @@ function validateTrainingPostgresMounts(context, containerJson) {
   });
 }
 
+function validateContainerSettings(container, state, phase) {
+  if (
+    container.Id !== state.container.id ||
+    container.Image !== state.imageId ||
+    container.Name !== `/${state.name}` ||
+    !isRecord(container.Config) ||
+    container.Config.Image !== state.imageId ||
+    !exactKeys(container.Config.Labels, [OWNER_LABEL, RUN_LABEL]) ||
+    container.Config.Labels[OWNER_LABEL] !== OWNER_VALUE ||
+    container.Config.Labels[RUN_LABEL] !== state.runId ||
+    container.Config.User !== '0' ||
+    !Array.isArray(container.Config.Entrypoint) ||
+    container.Config.Entrypoint.length !== 1 ||
+    container.Config.Entrypoint[0] !== 'docker-entrypoint.sh' ||
+    !Array.isArray(container.Config.Cmd) ||
+    container.Config.Cmd.length !== 1 ||
+    container.Config.Cmd[0] !== 'postgres'
+  )
+    return false;
+
+  const expectedRunning = phase === 'running';
+  const expectedStatus = expectedRunning ? 'running' : 'created';
+  const runtime = container.State;
+  if (
+    !isRecord(runtime) ||
+    runtime.Status !== expectedStatus ||
+    runtime.Running !== expectedRunning ||
+    runtime.Paused !== false ||
+    runtime.Restarting !== false ||
+    runtime.Dead !== false
+  )
+    return false;
+
+  const host = container.HostConfig;
+  if (
+    !isRecord(host) ||
+    host.ReadonlyRootfs !== true ||
+    host.Privileged !== false ||
+    host.PublishAllPorts !== false ||
+    !noPublishedPorts(host.PortBindings) ||
+    host.NetworkMode !== state.network.id
+  )
+    return false;
+
+  const networkSettings = container.NetworkSettings;
+  if (
+    !isRecord(networkSettings) ||
+    !isRecord(networkSettings.Networks) ||
+    !exactKeys(networkSettings.Networks, [state.name]) ||
+    !isRecord(networkSettings.Networks[state.name]) ||
+    networkSettings.Networks[state.name].NetworkID !== state.network.id ||
+    !isRecord(networkSettings.Ports)
+  )
+    return false;
+  const endpoint = networkSettings.Networks[state.name];
+  if (
+    endpoint.EndpointID !== undefined &&
+    endpoint.EndpointID !== '' &&
+    (typeof endpoint.EndpointID !== 'string' ||
+      !/^[a-f\d]{64}$/.test(endpoint.EndpointID))
+  )
+    return false;
+  if (expectedRunning && !/^[a-f\d]{64}$/.test(endpoint.EndpointID ?? ''))
+    return false;
+
+  // A null port mapping means exposed only inside the container; no host bind.
+  for (const [port, bindings] of Object.entries(networkSettings.Ports)) {
+    if (
+      port !== '5432/tcp' ||
+      (bindings !== null && (!Array.isArray(bindings) || bindings.length !== 0))
+    )
+      return false;
+  }
+  return true;
+}
+
+function validateTrainingPostgresIsolation(
+  context,
+  containerJson,
+  networkJson,
+  phase,
+) {
+  let state;
+  let network;
+  let mounts;
+  try {
+    state = readRecoveryState(context);
+    validatePreparedArtifacts(context);
+    network = validateTrainingPostgresNetwork(context, networkJson, phase);
+    mounts = validateTrainingPostgresMounts(context, containerJson);
+  } catch {
+    rejectIsolationObservation();
+  }
+  if (
+    typeof containerJson !== 'string' ||
+    Buffer.byteLength(containerJson, 'utf8') >
+      MAX_CONTAINER_OBSERVATION_BYTES ||
+    !['created', 'running'].includes(phase) ||
+    !isRecord(state.container) ||
+    typeof state.container.id !== 'string' ||
+    !/^[a-f\d]{64}$/.test(state.container.id) ||
+    state.container.uncertain !== false ||
+    state.container.absent !== false ||
+    !isRecord(state.network) ||
+    typeof state.network.id !== 'string' ||
+    !/^[a-f\d]{64}$/.test(state.network.id) ||
+    state.network.uncertain !== false ||
+    state.network.absent !== false ||
+    typeof state.imageId !== 'string' ||
+    !/^sha256:[a-f\d]{64}$/.test(state.imageId) ||
+    typeof state.runId !== 'string' ||
+    typeof state.name !== 'string' ||
+    context.name !== state.name ||
+    state.proofSucceeded !== false ||
+    state.cleanupConfirmed !== false ||
+    network.phase !== phase
+  )
+    rejectIsolationObservation();
+
+  let container;
+  let networkInspection;
+  try {
+    container = JSON.parse(containerJson);
+    networkInspection = JSON.parse(networkJson);
+  } catch {
+    rejectIsolationObservation();
+  }
+  if (
+    !isRecord(container) ||
+    !validateContainerSettings(container, state, phase)
+  )
+    rejectIsolationObservation();
+  const networkMembers = networkInspection.Containers;
+  if (Object.keys(networkMembers).length === 1) {
+    const member = networkMembers[state.container.id];
+    const endpoint = container.NetworkSettings.Networks[state.name];
+    if (
+      !member ||
+      member.Name !== state.name ||
+      (member.EndpointID !== '' &&
+        endpoint.EndpointID !== '' &&
+        member.EndpointID !== endpoint.EndpointID)
+    )
+      rejectIsolationObservation();
+  }
+
+  return Object.freeze({
+    name: state.name,
+    phase,
+    containerId: state.container.id,
+    networkId: state.network.id,
+    imageId: state.imageId,
+    networkMemberCount: network.memberCount,
+    readonlyRootfs: true,
+    proofMountReadonly: mounts.proofMountReadonly,
+    hostPortsPublished: false,
+  });
+}
+
 module.exports = {
   validateTrainingPostgresImage,
   validateTrainingPostgresNetwork,
   validateTrainingPostgresMounts,
+  validateTrainingPostgresIsolation,
 };

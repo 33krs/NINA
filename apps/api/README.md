@@ -147,6 +147,16 @@ three tmpfs options and sole read-only SQL bind in planned and actual mount
 inspection records. Its frozen response only confirms the mount contract; it
 does not confirm the container identity or grant cleanup authority.
 
+`validateTrainingPostgresIsolation()` composes that network check with the
+read-only prepared-artifact identity/lifecycle check and one bounded container
+inspection. It confirms the registered image, labels, runtime state, root-readonly
+and non-privileged flags, internal-network attachment, unpublished ports, exact
+tmpfs options, and the sole read-only SQL bind. It rejects actual named/anonymous
+volume mounts and unrelated mounts while allowing the image's declared PGDATA
+volume metadata. Its frozen result contains only fixed ownership and safety
+metadata; it grants no cleanup authority and does not constitute live Docker
+evidence. The caller must serialize inspection against recovery finalization.
+
 ## Training-account PostgreSQL SQL receipts (import-only)
 
 The assertion SQL emits one versioned, run-ID-bound text row only after each
