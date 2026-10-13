@@ -220,7 +220,7 @@ function trainingAccountPostgresCommand(context, fixture, operation) {
         container.id,
         'sh',
         '-c',
-        'export PGPASSWORD="$POSTGRES_PASSWORD"; exec psql --no-psqlrc --set ON_ERROR_STOP=1 --host=127.0.0.1 --port=5432 --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --file=/run/nina-proof/proof.sql',
+        'export PGPASSWORD="$POSTGRES_PASSWORD"; exec psql --quiet --tuples-only --no-align --no-password --no-psqlrc --set ON_ERROR_STOP=1 --host=127.0.0.1 --port=5432 --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --file=/run/nina-proof/proof.sql',
       ]);
     default:
       invalidPlan();
