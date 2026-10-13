@@ -1,9 +1,17 @@
 const {
   readRecoveryState,
+  validatePreparedArtifacts,
 } = require('./verify-training-accounts-postgres.cjs');
 
 const MAX_OBSERVATION_BYTES = 256 * 1024;
 const MAX_NETWORK_OBSERVATION_BYTES = 64 * 1024;
+const MAX_CONTAINER_OBSERVATION_BYTES = 256 * 1024;
+const PROOF_PATH = '/run/nina-proof/proof.sql';
+const TMPFS = Object.freeze({
+  '/tmp': 'rw,noexec,nosuid,size=16m',
+  '/run/postgresql': 'rw,noexec,nosuid,size=16m',
+  '/var/lib/postgresql/data': 'rw,noexec,nosuid,size=256m',
+});
 const IMAGE_TAG = 'postgres:15-alpine';
 const PGDATA = '/var/lib/postgresql/data';
 const ARCHITECTURES = new Set(['amd64', 'arm64']);
@@ -215,7 +223,154 @@ function validateTrainingPostgresNetwork(context, networkJson, phase) {
   });
 }
 
+function rejectMountObservation() {
+  throw new Error('Training-account PostgreSQL mount observation rejected');
+}
+
+function validateActualMounts(mounts, proofSql) {
+  if (!Array.isArray(mounts) || mounts.length > 8) return false;
+  let proofMounts = 0;
+  const tmpfsDestinations = new Set();
+  for (const mount of mounts) {
+    if (
+      !isRecord(mount) ||
+      Object.keys(mount).some(
+        (key) =>
+          ![
+            'Type',
+            'Name',
+            'Source',
+            'Destination',
+            'Driver',
+            'Mode',
+            'RW',
+            'Propagation',
+          ].includes(key),
+      )
+    )
+      return false;
+    if (mount.Type === 'bind') {
+      if (
+        mount.Source !== proofSql ||
+        mount.Destination !== PROOF_PATH ||
+        mount.RW !== false ||
+        (mount.Propagation !== undefined &&
+          ![
+            '',
+            'private',
+            'rprivate',
+            'shared',
+            'rshared',
+            'slave',
+            'rslave',
+          ].includes(mount.Propagation)) ||
+        (mount.Mode !== undefined &&
+          (typeof mount.Mode !== 'string' ||
+            !/(?:^|,)ro(?:,|$)/.test(mount.Mode)))
+      )
+        return false;
+      proofMounts += 1;
+      if (proofMounts > 1) return false;
+      continue;
+    }
+    if (mount.Type === 'tmpfs') {
+      const destination = mount.Destination;
+      if (
+        typeof destination !== 'string' ||
+        !Object.hasOwn(TMPFS, destination) ||
+        tmpfsDestinations.has(destination) ||
+        mount.RW !== true ||
+        (mount.Mode !== undefined && mount.Mode !== TMPFS[destination])
+      )
+        return false;
+      tmpfsDestinations.add(destination);
+      continue;
+    }
+    // Named/anonymous volumes and unrecognized bind types are never allowed.
+    return false;
+  }
+  return proofMounts === 1;
+}
+
+function validateMountSettings(container, proofSql) {
+  const host = container.HostConfig;
+  if (
+    !isRecord(host) ||
+    !exactKeys(host.Tmpfs, Object.keys(TMPFS)) ||
+    Object.keys(TMPFS).some(
+      (destination) => host.Tmpfs[destination] !== TMPFS[destination],
+    ) ||
+    !Array.isArray(host.Mounts) ||
+    host.Mounts.length !== 1
+  )
+    return false;
+
+  const plannedMount = host.Mounts[0];
+  if (
+    !isRecord(plannedMount) ||
+    Object.keys(plannedMount).some(
+      (key) =>
+        ![
+          'Type',
+          'Source',
+          'Target',
+          'ReadOnly',
+          'Consistency',
+          'BindOptions',
+          'VolumeOptions',
+          'TmpfsOptions',
+        ].includes(key),
+    ) ||
+    plannedMount.Type !== 'bind' ||
+    plannedMount.Source !== proofSql ||
+    plannedMount.Target !== PROOF_PATH ||
+    plannedMount.ReadOnly !== true ||
+    (plannedMount.Consistency !== undefined &&
+      !['', 'default'].includes(plannedMount.Consistency)) ||
+    ['BindOptions', 'VolumeOptions', 'TmpfsOptions'].some(
+      (key) =>
+        plannedMount[key] !== undefined &&
+        plannedMount[key] !== null &&
+        (!isRecord(plannedMount[key]) ||
+          Object.keys(plannedMount[key]).length !== 0),
+    )
+  )
+    return false;
+
+  return validateActualMounts(container.Mounts, proofSql);
+}
+
+function validateTrainingPostgresMounts(context, containerJson) {
+  let artifacts;
+  try {
+    artifacts = validatePreparedArtifacts(context);
+  } catch {
+    rejectMountObservation();
+  }
+  if (
+    typeof containerJson !== 'string' ||
+    Buffer.byteLength(containerJson, 'utf8') > MAX_CONTAINER_OBSERVATION_BYTES
+  )
+    rejectMountObservation();
+  let container;
+  try {
+    container = JSON.parse(containerJson);
+  } catch {
+    rejectMountObservation();
+  }
+  if (
+    !isRecord(container) ||
+    !validateMountSettings(container, artifacts.proofSql)
+  )
+    rejectMountObservation();
+  return Object.freeze({
+    proofMountReadonly: true,
+    temporaryFileSystems: 3,
+  });
+}
+
 module.exports = {
   validateTrainingPostgresImage,
   validateTrainingPostgresNetwork,
+  validateTrainingPostgresMounts,
 };

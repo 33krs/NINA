@@ -8,11 +8,13 @@ const recovery = require('./verify-training-accounts-postgres.cjs');
 const {
   validateTrainingPostgresImage,
   validateTrainingPostgresNetwork,
+  validateTrainingPostgresMounts,
 } = require('./training-accounts-postgres-observations.cjs');
 
 const NETWORK_ID = 'b'.repeat(64);
 const CONTAINER_ID = 'c'.repeat(64);
 const IMAGE_ID = `sha256:${'a'.repeat(64)}`;
+const PROOF_PATH = '/run/nina-proof/proof.sql';
 const NETWORK_REJECTION =
   'Training-account PostgreSQL network observation rejected';
 const roots = new Set();
@@ -52,6 +54,31 @@ function networkContext() {
   );
   roots.add(temporaryDirectory);
   return recovery.createRecoveryContext({ temporaryDirectory });
+}
+
+function mountObservation(context) {
+  const { proofSql } = recovery.validatePreparedArtifacts(context);
+  return {
+    HostConfig: {
+      Tmpfs: {
+        '/tmp': 'rw,noexec,nosuid,size=16m',
+        '/run/postgresql': 'rw,noexec,nosuid,size=16m',
+        '/var/lib/postgresql/data': 'rw,noexec,nosuid,size=256m',
+      },
+      Mounts: [
+        { Type: 'bind', Source: proofSql, Target: PROOF_PATH, ReadOnly: true },
+      ],
+    },
+    Mounts: [
+      {
+        Type: 'bind',
+        Source: proofSql,
+        Destination: PROOF_PATH,
+        RW: false,
+        Mode: 'ro',
+      },
+    ],
+  };
 }
 
 async function registerNetwork(context, networkId = NETWORK_ID) {
@@ -372,4 +399,61 @@ it('rejects proof-complete or cleanup-confirmed recovery contexts', async () => 
     },
   });
   assertNetworkRejected(cleanupConfirmed, networkObservation(cleanupConfirmed));
+});
+
+it('validates the exact SQL bind and tmpfs mount contract independently', async () => {
+  const context = networkContext();
+  recovery.writePrivateArtifact(context, 'proof_sql', 'SELECT 1;\n');
+  recovery.writePrivateArtifact(
+    context,
+    'postgres_env',
+    'POSTGRES_DB=synthetic\nPOSTGRES_USER=synthetic\nPOSTGRES_PASSWORD=synthetic\n',
+  );
+  const valid = mountObservation(context);
+  const result = validateTrainingPostgresMounts(context, JSON.stringify(valid));
+  assert.deepEqual(result, {
+    proofMountReadonly: true,
+    temporaryFileSystems: 3,
+  });
+  assert.equal(Object.isFrozen(result), true);
+
+  const cases = [
+    {
+      ...valid,
+      HostConfig: {
+        ...valid.HostConfig,
+        Tmpfs: { ...valid.HostConfig.Tmpfs, '/tmp': 'rw' },
+      },
+    },
+    {
+      ...valid,
+      HostConfig: {
+        ...valid.HostConfig,
+        Mounts: [{ ...valid.HostConfig.Mounts[0], ReadOnly: false }],
+      },
+    },
+    {
+      ...valid,
+      Mounts: valid.Mounts.map((mount) => ({ ...mount, RW: true })),
+    },
+    {
+      ...valid,
+      Mounts: [
+        ...valid.Mounts,
+        {
+          Type: 'volume',
+          Name: 'synthetic-volume',
+          Source: '/var/lib/docker/volumes/synthetic',
+          Destination: '/var/lib/postgresql/data',
+          RW: true,
+        },
+      ],
+    },
+  ];
+  for (const value of cases) {
+    assert.throws(
+      () => validateTrainingPostgresMounts(context, JSON.stringify(value)),
+      { message: 'Training-account PostgreSQL mount observation rejected' },
+    );
+  }
 });
