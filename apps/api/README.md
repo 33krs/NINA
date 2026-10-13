@@ -118,6 +118,18 @@ and the root-to-`postgres` initialization behavior comes from the
 [official PostgreSQL image entrypoint](https://github.com/docker-library/postgres/blob/master/docker-entrypoint.sh).
 Synthetic tests inspect the plan without invoking Docker.
 
+## Training-account PostgreSQL image observations (import-only)
+
+`training-accounts-postgres-observations.cjs` validates bounded JSON returned
+by the fixed `postgres:15-alpine` image inspection plan. It accepts only Linux
+images for explicitly supported `amd64` and `arm64` architectures, a canonical
+immutable image ID, the expected tag association, and PostgreSQL 15 startup
+metadata (`PG_MAJOR`, `PG_VERSION`, `PGDATA`, entrypoint, command, and user).
+The result contains only the immutable ID and safe version/architecture fields;
+rejected observations use a fixed generic error. This confirms inspected tag
+metadata association only. It does not establish publisher provenance or the
+version of a running database server, and does not execute Docker.
+
 ## Training-account PostgreSQL SQL receipts (import-only)
 
 The assertion SQL emits one versioned, run-ID-bound text row only after each
