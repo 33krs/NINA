@@ -13,6 +13,7 @@ const {
   readRecoveryState,
   reportFailure,
   writePrivateArtifact,
+  validatePreparedArtifacts,
 } = require('./verify-training-accounts-postgres.cjs');
 
 const IMAGE_ID = `sha256:${'a'.repeat(64)}`;
@@ -109,6 +110,56 @@ async function captureOwnedPair(context, world = fakeDocker(context)) {
 }
 
 describe('training account PostgreSQL recovery foundation', () => {
+  it('returns only exact validated paths for both complete private artifacts', () => {
+    const context = createContext();
+    writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    writePrivateArtifact(context, 'postgres_env', 'POSTGRES_DB=synthetic\n');
+
+    const prepared = validatePreparedArtifacts(context);
+
+    assert.deepEqual(prepared, {
+      proofSql: path.join(context.root, 'proof.sql'),
+      postgresEnv: path.join(context.root, 'postgres.env'),
+    });
+    assert.equal(Object.isFrozen(prepared), true);
+  });
+
+  it('refuses incomplete, replaced, or foreign recovery artifacts', () => {
+    const incomplete = createContext();
+    writePrivateArtifact(incomplete, 'proof_sql', 'SELECT 1;');
+    assert.throws(() => validatePreparedArtifacts(incomplete));
+
+    const replaced = createContext();
+    writePrivateArtifact(replaced, 'proof_sql', 'SELECT 1;');
+    writePrivateArtifact(replaced, 'postgres_env', 'POSTGRES_DB=synthetic\n');
+    fs.unlinkSync(path.join(replaced.root, 'proof.sql'));
+    fs.writeFileSync(path.join(replaced.root, 'proof.sql'), 'SELECT 1;');
+    fs.chmodSync(path.join(replaced.root, 'proof.sql'), 0o600);
+    assert.throws(() => validatePreparedArtifacts(replaced));
+
+    const foreign = Object.freeze({ ...replaced });
+    assert.throws(() => validatePreparedArtifacts(foreign));
+  });
+
+  it('revalidates the canonical root and rejects linked artifact files', () => {
+    const aliased = createContext();
+    writePrivateArtifact(aliased, 'proof_sql', 'SELECT 1;');
+    writePrivateArtifact(aliased, 'postgres_env', 'POSTGRES_DB=synthetic\n');
+    const movedRoot = `${aliased.root}-moved`;
+    fs.renameSync(aliased.root, movedRoot);
+    fs.symlinkSync(movedRoot, aliased.root);
+    assert.throws(() => validatePreparedArtifacts(aliased));
+
+    const linked = createContext();
+    writePrivateArtifact(linked, 'proof_sql', 'SELECT 1;');
+    writePrivateArtifact(linked, 'postgres_env', 'POSTGRES_DB=synthetic\n');
+    fs.linkSync(
+      path.join(linked.root, 'proof.sql'),
+      path.join(path.dirname(linked.root), 'foreign-proof-link'),
+    );
+    assert.throws(() => validatePreparedArtifacts(linked));
+  });
+
   it('creates fresh immutable run identity and private recovery files', () => {
     const first = createContext();
     const second = createContext();
