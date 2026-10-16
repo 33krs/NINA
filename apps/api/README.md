@@ -208,6 +208,13 @@ cleanup reconciles only the unique per-run names with matching ownership labels
 before deleting exact inspected IDs. Do not run the live spec directly against
 another database.
 
+The shared local subprocess runner trims successful decoded stdout by default.
+An internal caller may set `preserveStdout: true` to receive that decoded string
+unchanged, including whitespace and line endings; this does not promise raw-byte
+preservation. The option must be a boolean and is captured once before spawning.
+Nonzero exits, timeouts, cancellation, output bounds, and redacted error behavior
+remain unchanged; failed-command stdout is never returned.
+
 ## Pharmacy partial-dispensing ledger
 
 The additive dispensing migration records events (`PrescriptionDispensing`) for

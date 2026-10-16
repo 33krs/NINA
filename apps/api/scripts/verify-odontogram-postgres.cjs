@@ -234,7 +234,20 @@ function redact(value, secrets = []) {
     );
 }
 
+function stdoutPreservationOption(options) {
+  let value;
+  try {
+    value = options?.preserveStdout;
+  } catch {
+    throw new Error('Invalid stdout preservation option');
+  }
+  if (value !== undefined && typeof value !== 'boolean')
+    throw new Error('Invalid stdout preservation option');
+  return value === true;
+}
+
 async function run(command, args, options = {}) {
+  const preserveStdout = stdoutPreservationOption(options);
   const stage = options.stage;
   if (
     stage !== undefined &&
@@ -350,7 +363,7 @@ async function run(command, args, options = {}) {
   }
   options.guard?.();
   if (stage) console.log(`PG15_STAGE_PASSED ${stage}`);
-  return (result.stdout || '').trim();
+  return preserveStdout ? result.stdout : (result.stdout || '').trim();
 }
 
 function docker(args, options = {}) {

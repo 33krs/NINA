@@ -352,15 +352,144 @@ for (const [signal, phase, exitCode, options = {}] of [
 
 test('async subprocesses retain stdout and nonzero status with stderr', async () => {
   assert.equal(
-    await run(process.execPath, ['-e', 'console.log(" complete ")']),
+    await run('/bin/sh', ['-c', 'printf %s "$1"', 'runner-test', ' complete ']),
     'complete',
   );
+  assert.equal(
+    await run(
+      '/bin/sh',
+      ['-c', 'printf %s "$1"', 'runner-test', ' complete '],
+      { preserveStdout: false },
+    ),
+    'complete',
+  );
+  const exactOutput = '  café\r\n\n';
+  assert.equal(
+    await run('/bin/sh', ['-c', 'printf %s "$1"', 'runner-test', exactOutput], {
+      preserveStdout: true,
+    }),
+    exactOutput,
+  );
   await assert.rejects(
-    run(process.execPath, [
-      '-e',
-      'console.error("expected failure"); process.exit(7)',
+    run('/bin/sh', [
+      '-c',
+      'printf %s "$1" >&2; exit 7',
+      'runner-test',
+      'expected failure',
     ]),
     (error) => error.status === 7 && error.stderr.trim() === 'expected failure',
+  );
+  await assert.rejects(
+    run(
+      '/bin/sh',
+      ['-c', 'printf %s "$1" >&2; exit 7', 'runner-test', 'private_marker'],
+      { preserveStdout: true, redactions: ['private_marker'] },
+    ),
+    (error) => {
+      assert.equal(error.status, 7);
+      assert.doesNotMatch(error.message + error.stderr, /private_marker/);
+      return true;
+    },
+  );
+});
+
+test('stdout preservation snapshots one boolean and rejects unsafe options before spawn', async () => {
+  let reads = 0;
+  const changing = {
+    get preserveStdout() {
+      reads += 1;
+      return reads === 1;
+    },
+  };
+  assert.equal(
+    await run(
+      '/bin/sh',
+      ['-c', 'printf %s "$1"', 'runner-test', ' retained '],
+      changing,
+    ),
+    ' retained ',
+  );
+  assert.equal(reads, 1);
+
+  const marker = path.join(os.tmpdir(), `nina-run-not-started-${process.pid}`);
+  fs.rmSync(marker, { force: true });
+  for (const options of [
+    { preserveStdout: 'true' },
+    Object.defineProperty({}, 'preserveStdout', {
+      get() {
+        throw new Error(marker);
+      },
+    }),
+  ]) {
+    await assert.rejects(
+      run('/bin/sh', ['-c', 'touch "$1"', 'runner-test', marker], options),
+      { message: 'Invalid stdout preservation option' },
+    );
+    assert.equal(fs.existsSync(marker), false);
+  }
+});
+
+test('preserved stdout is not trimmed into a valid SQL receipt', async () => {
+  const {
+    parseTrainingAccountSqlReceipt,
+    trainingAccountSqlCheckpoint,
+  } = require('./training-accounts-postgres-receipt.cjs');
+  const runId = require('node:crypto').randomUUID();
+  const checkpoints = [
+    'table_empty_before',
+    'role_enum_values',
+    'role_has_no_default',
+    'username_c_collation',
+    'valid_username_boundaries',
+    'explicit_roles_and_defaults',
+    'role_default',
+    'username_null',
+    'username_noncanonical',
+    'username_too_short',
+    'auth_version_negative',
+    'username_duplicate',
+    'table_empty_after',
+    'table_empty_after_rollback',
+    'proof_complete',
+  ];
+  const receipt = `${checkpoints
+    .map((checkpoint) =>
+      trainingAccountSqlCheckpoint(runId, checkpoint).slice(
+        "SELECT '".length,
+        -"' AS proof_record;".length,
+      ),
+    )
+    .join('\n')}`;
+  const unpadded = await run(
+    '/bin/sh',
+    ['-c', 'printf "%s" "$1"', 'runner-test', receipt],
+    { preserveStdout: true },
+  );
+  assert.equal(unpadded, receipt);
+  assert.equal(
+    parseTrainingAccountSqlReceipt(unpadded, runId, 0).complete,
+    true,
+  );
+
+  const prefixed = `  ${receipt}`;
+  const preserved = await run(
+    '/bin/sh',
+    ['-c', 'printf "%s" "$1"', 'runner-test', prefixed],
+    { preserveStdout: true },
+  );
+  assert.equal(preserved, prefixed);
+  assert.throws(() => parseTrainingAccountSqlReceipt(preserved, runId, 0));
+
+  const trimmed = await run('/bin/sh', [
+    '-c',
+    'printf "%s" "$1"',
+    'runner-test',
+    prefixed,
+  ]);
+  assert.equal(trimmed, receipt);
+  assert.equal(
+    parseTrainingAccountSqlReceipt(trimmed, runId, 0).complete,
+    true,
   );
 });
 
@@ -373,22 +502,54 @@ test('async subprocesses preserve spawn errors', async () => {
 test('async subprocess timeout force-kills an uncooperative owned child', async () => {
   const startedAt = Date.now();
   await assert.rejects(
-    run(
-      process.execPath,
-      ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
-      { timeout: 500 },
-    ),
+    run('/bin/sh', ['-c', 'trap "" TERM; while :; do sleep 1; done'], {
+      timeout: 500,
+      preserveStdout: true,
+    }),
     { code: 'ETIMEDOUT', killed: true },
   );
   assert.ok(Date.now() - startedAt < 2500);
 });
 
+test('preserved-output cancellation settles the child process group before rejecting', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-preserve-cancel-'));
+  const pidFile = path.join(root, 'child-pids');
+  const controller = new AbortController();
+  const childRun = run(
+    '/bin/sh',
+    [
+      '-c',
+      'sleep 30 & child=$!; printf "%s %s\\n" "$$" "$child" > "$1"; trap "" TERM; while :; do sleep 1; done',
+      'runner-test',
+      pidFile,
+    ],
+    { signal: controller.signal, preserveStdout: true, timeout: 5000 },
+  );
+  try {
+    await waitUntil(
+      () => fs.existsSync(pidFile),
+      'child process did not start',
+    );
+    const [parentPid, descendantPid] = fs
+      .readFileSync(pidFile, 'utf8')
+      .trim()
+      .split(/\s+/)
+      .map(Number);
+    controller.abort();
+    await assert.rejects(childRun, /cancelled by signal/);
+    for (const pid of [parentPid, descendantPid])
+      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  } finally {
+    controller.abort();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('async subprocess output remains bounded', async () => {
   await assert.rejects(
-    run(process.execPath, [
-      '-e',
-      'process.stdout.write(Buffer.alloc(9 * 1024 * 1024)); setInterval(() => {}, 1000)',
-    ]),
+    run('/bin/sh', ['-c', 'head -c 9437185 /dev/zero; sleep 5'], {
+      preserveStdout: true,
+    }),
     { code: 'ENOBUFS', killed: true },
   );
 });
