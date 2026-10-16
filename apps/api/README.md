@@ -486,3 +486,24 @@ This proves migration constraints, not cross-medication/prescription matching,
 expiry eligibility, service transactions, concurrency or administrator resistance.
 The existing deterministic helper tests and offline Prisma checks remain useful;
 run the isolated command before claiming live database proof.
+
+## Training-account PostgreSQL proof command
+
+Build the API before using this command so fixture preparation can load the
+compiled password hasher. Help is inert; review the invocation before requesting
+a separately authorized isolated run:
+
+```sh
+npm run build --workspace=@nina/api
+npm run training-accounts:postgres --workspace=@nina/api -- --help
+npm run training-accounts:postgres --workspace=@nina/api -- --run-isolated
+```
+
+Only the exact `--run-isolated` option starts the proof runtime. It uses the
+cached PostgreSQL 15 image through the local Docker daemon, creates an isolated
+synthetic-account fixture, and cleans up only resources its recovery checks
+confirm as owned. Private proof credentials remain in private fixture artifacts;
+command output is limited to fixed status and validated outcome booleans.
+Incomplete proof or cleanup retains recovery evidence. The command does not
+target an existing application database. Do not claim live proof unless the
+separately authorized run completes with proof and owned cleanup both confirmed.

@@ -11,6 +11,7 @@
     "test:pharmacy:dispensing:postgres": "npm run build && node scripts/verify-odontogram-postgres.cjs --suite=pharmacy-dispensing",
     "test:pharmacy:redis": "npm run build && node scripts/verify-pharmacy-redis.cjs --isolated",
     "test:odontogram:postgres": "node scripts/verify-odontogram-postgres.cjs",
+    "training-accounts:postgres": "node scripts/verify-training-accounts-postgres-cli.cjs",
     "lint": "eslint \"src/**/*.ts\""
   },
   "jest": {
