@@ -93,7 +93,7 @@ function validateTrainingPostgresImage(imageJson, expectedArchitecture) {
     !Array.isArray(image.Config.Cmd) ||
     image.Config.Cmd.length !== 1 ||
     image.Config.Cmd[0] !== 'postgres' ||
-    image.Config.User !== ''
+    (Object.hasOwn(image.Config, 'User') && image.Config.User !== '')
   )
     rejectObservation();
 

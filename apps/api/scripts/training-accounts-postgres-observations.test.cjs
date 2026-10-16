@@ -213,6 +213,40 @@ it('returns only frozen safe metadata for one compatible official-tag observatio
   assert.equal(Object.isFrozen(observed), true);
 });
 
+it('accepts only an omitted or explicit empty image Config.User', () => {
+  const { User, ...configWithoutUser } = image().Config;
+  assert.equal(User, '');
+  assert.equal(Object.hasOwn(configWithoutUser, 'User'), false);
+  assert.deepEqual(
+    observe({ ...image(), Config: configWithoutUser }),
+    observe(image()),
+  );
+  assert.deepEqual(
+    observe({ ...image(), Config: { ...configWithoutUser, User: '' } }),
+    observe(image()),
+  );
+
+  for (const invalidUser of [
+    null,
+    0,
+    false,
+    {},
+    [],
+    'root',
+    '0',
+    'postgres',
+    ' ',
+  ]) {
+    const value = {
+      ...image(),
+      Config: { ...configWithoutUser, User: invalidUser },
+    };
+    assert.throws(() => observe(value), {
+      message: 'Training-account PostgreSQL image observation rejected',
+    });
+  }
+});
+
 it('accepts only the explicit supported architecture and matching expectation', () => {
   const arm = image({ Architecture: 'arm64' });
   assert.equal(observe(arm, 'arm64').architecture, 'arm64');
@@ -596,6 +630,13 @@ it('rejects identity, runtime-state, isolation, publishing, and ownership drift'
       ...valid,
       Config: { ...valid.Config, Image: `sha256:${'f'.repeat(64)}` },
     },
+    (() => {
+      const { User, ...config } = valid.Config;
+      assert.equal(User, '0');
+      return { ...valid, Config: config };
+    })(),
+    { ...valid, Config: { ...valid.Config, User: '' } },
+    { ...valid, Config: { ...valid.Config, User: 'root' } },
     { ...valid, Config: { ...valid.Config, User: 'postgres' } },
     {
       ...valid,
