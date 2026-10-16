@@ -1111,6 +1111,26 @@ describe('training account PostgreSQL recovery foundation', () => {
     assert.equal(fs.existsSync(context.manifestPath), true);
   });
 
+  it('records only fixed startup and server-version diagnostic stages', () => {
+    const context = createContext();
+    for (const stage of ['container_start', 'server_version']) {
+      const diagnostic = reportFailure(
+        context,
+        stage,
+        Object.assign(new Error('private diagnostic contents'), {
+          status: 7,
+          stderr: 'synthetic password marker',
+        }),
+      );
+      assert.equal(diagnostic.stage, stage);
+      assert.equal(diagnostic.reason, 'exit_status');
+      assert.equal(JSON.stringify(diagnostic).includes('password'), false);
+    }
+    assert.throws(() =>
+      reportFailure(context, 'caller_controlled_stage', new Error('private')),
+    );
+  });
+
   it('passes and disposes private evidence only after proof success and confirmed cleanup', async () => {
     const context = createContext();
     const world = await captureOwnedPair(context);

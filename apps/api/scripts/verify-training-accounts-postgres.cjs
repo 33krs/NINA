@@ -42,6 +42,8 @@ const STAGES = new Set([
   'proof_write',
   'proof_validation',
   'readiness',
+  'container_start',
+  'server_version',
   'sql_assertion',
   'cleanup',
 ]);

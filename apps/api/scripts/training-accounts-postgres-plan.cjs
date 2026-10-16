@@ -23,7 +23,10 @@ const OPERATIONS = new Set([
   'create_network',
   'create_container',
   'start_container',
+  'inspect_network',
+  'inspect_container',
   'wait_ready',
+  'server_version',
   'run_assertions',
 ]);
 
@@ -188,6 +191,40 @@ function trainingAccountPostgresCommand(context, fixture, operation) {
       )
         invalidPlan();
       return fixedArgs(['start', container.id]);
+    case 'inspect_network':
+      if (
+        !/^[a-f\d]{64}$/.test(network.id ?? '') ||
+        network.uncertain ||
+        network.absent ||
+        !imageId
+      )
+        invalidPlan();
+      return fixedArgs([
+        'network',
+        'inspect',
+        '--format',
+        '{{json .}}',
+        network.id,
+      ]);
+    case 'inspect_container':
+      if (
+        !/^[a-f\d]{64}$/.test(container.id ?? '') ||
+        container.uncertain ||
+        container.absent ||
+        !/^[a-f\d]{64}$/.test(network.id ?? '') ||
+        network.uncertain ||
+        network.absent ||
+        !imageId
+      )
+        invalidPlan();
+      return fixedArgs([
+        'inspect',
+        '--type',
+        'container',
+        '--format',
+        '{{json .}}',
+        container.id,
+      ]);
     case 'wait_ready':
       requirePreparedArtifacts(context, validated.artifacts);
       if (
@@ -203,7 +240,28 @@ function trainingAccountPostgresCommand(context, fixture, operation) {
         container.id,
         'sh',
         '-c',
-        'until pg_isready --quiet --host=127.0.0.1 --port=5432 --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"; do sleep 1; done',
+        'set -eu; attempts=0; until pg_isready --quiet --host=127.0.0.1 --port=5432 --username="$POSTGRES_USER" --dbname="$POSTGRES_DB"; do attempts=$((attempts + 1)); if [ "$attempts" -ge 30 ]; then exit 1; fi; sleep 1; done',
+      ]);
+    case 'server_version':
+      requirePreparedArtifacts(context, validated.artifacts);
+      if (
+        !/^[a-f\d]{64}$/.test(container.id ?? '') ||
+        container.uncertain ||
+        container.absent ||
+        !/^[a-f\d]{64}$/.test(network.id ?? '') ||
+        network.uncertain ||
+        network.absent ||
+        !imageId
+      )
+        invalidPlan();
+      return fixedArgs([
+        'exec',
+        '--user',
+        '0',
+        container.id,
+        'sh',
+        '-c',
+        'export PGPASSWORD="$POSTGRES_PASSWORD" PGOPTIONS="-c statement_timeout=20000 -c lock_timeout=3000"; exec psql --quiet --tuples-only --no-align --no-password --no-psqlrc --set ON_ERROR_STOP=1 --host=127.0.0.1 --port=5432 --username="$POSTGRES_USER" --dbname="$POSTGRES_DB" --command="SHOW server_version_num"',
       ]);
     case 'run_assertions':
       requirePreparedArtifacts(context, validated.artifacts);

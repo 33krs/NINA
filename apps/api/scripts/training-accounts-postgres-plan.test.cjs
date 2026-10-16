@@ -155,6 +155,105 @@ it('plans readiness and SQL execution without exposing credential values', async
   assert.equal(Object.isFrozen(assertions), true);
 });
 
+it('plans exact owned resource observations and authenticated server version', async () => {
+  const { authority, fixture } = await readyContext();
+  recovery.bindImageIdentity(authority, IMAGE_ID);
+  await recovery.captureCreation(authority, 'network', async () => NETWORK_ID);
+
+  const network = trainingAccountPostgresCommand(
+    authority,
+    fixture,
+    'inspect_network',
+  );
+  assert.deepEqual(network, [
+    '--host',
+    'unix:///var/run/docker.sock',
+    'network',
+    'inspect',
+    '--format',
+    '{{json .}}',
+    NETWORK_ID,
+  ]);
+
+  await recovery.captureCreation(
+    authority,
+    'container',
+    async () => CONTAINER_ID,
+  );
+  const container = trainingAccountPostgresCommand(
+    authority,
+    fixture,
+    'inspect_container',
+  );
+  assert.deepEqual(container, [
+    '--host',
+    'unix:///var/run/docker.sock',
+    'inspect',
+    '--type',
+    'container',
+    '--format',
+    '{{json .}}',
+    CONTAINER_ID,
+  ]);
+
+  const version = trainingAccountPostgresCommand(
+    authority,
+    fixture,
+    'server_version',
+  );
+  const shellCommand = version.at(-1);
+  assert.match(shellCommand, /127\.0\.0\.1/);
+  assert.match(shellCommand, /--no-password/);
+  assert.match(shellCommand, /--no-psqlrc/);
+  assert.match(shellCommand, /SHOW server_version_num/);
+  assert.match(shellCommand, /PGOPTIONS=/);
+  assert.equal(version.includes(CONTAINER_ID), true);
+  assert.match(shellCommand, /PGPASSWORD="\$POSTGRES_PASSWORD"/);
+  assert.equal(Object.isFrozen(network), true);
+  assert.equal(Object.isFrozen(container), true);
+  assert.equal(Object.isFrozen(version), true);
+  assert.throws(() =>
+    trainingAccountPostgresCommand(
+      authority,
+      fixture,
+      'inspect_network',
+      NETWORK_ID,
+    ),
+  );
+});
+
+it('rejects owned observations and server probes before their lifecycle gates', async () => {
+  const { authority, fixture } = await readyContext();
+  for (const operation of [
+    'inspect_network',
+    'inspect_container',
+    'server_version',
+  ])
+    assert.throws(() =>
+      trainingAccountPostgresCommand(authority, fixture, operation),
+    );
+
+  recovery.bindImageIdentity(authority, IMAGE_ID);
+  let releaseCreation;
+  const creation = recovery.captureCreation(
+    authority,
+    'network',
+    () =>
+      new Promise((resolve) => {
+        releaseCreation = resolve;
+      }),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.throws(() =>
+    trainingAccountPostgresCommand(authority, fixture, 'inspect_network'),
+  );
+  releaseCreation(NETWORK_ID);
+  await creation;
+  assert.doesNotThrow(() =>
+    trainingAccountPostgresCommand(authority, fixture, 'inspect_network'),
+  );
+});
+
 it('rejects forged fixture paths, invalid operations, and changed artifact identity', async () => {
   const { authority, fixture } = await readyContext();
   assert.throws(() =>
