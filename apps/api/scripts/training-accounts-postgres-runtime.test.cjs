@@ -85,6 +85,7 @@ function createHarness(options = {}) {
   const events = [];
   const calls = [];
   const fixtureSignals = [];
+  const failureDetails = [];
   const controller = new AbortController();
   const context = {
     runId: RUN_ID,
@@ -109,6 +110,7 @@ function createHarness(options = {}) {
     running: JSON.stringify({ Id: CONTAINER_ID, State: 'running' }),
   };
   let started = false;
+  const actionCounts = new Map();
   let fixtureRelease;
   let delayedRunRelease;
 
@@ -130,9 +132,15 @@ function createHarness(options = {}) {
 
   async function run(command, args, runOptions) {
     const action = actionOf(args);
+    const actionCount = (actionCounts.get(action) ?? 0) + 1;
+    actionCounts.set(action, actionCount);
     calls.push({ command, args: [...args], options: runOptions, action });
     events.push(`run:${action}:start`);
-    if (options.failAt === action) {
+    if (
+      options.failAt === action &&
+      (options.failAtOccurrence === undefined ||
+        options.failAtOccurrence === actionCount)
+    ) {
       events.push(`run:${action}:end`);
       throw Object.assign(new Error('synthetic private password-marker'), {
         status: 7,
@@ -205,9 +213,16 @@ function createHarness(options = {}) {
         return id;
       });
     },
-    reportFailure(_context, stage, _error) {
+    reportFailure(_context, stage, error, metadata) {
       events.push(`failure:${stage}`);
-      return Object.freeze({ stage, reason: 'operation_failed' });
+      failureDetails.push({ stage, error, metadata });
+      return Object.freeze({
+        stage,
+        reason: 'operation_failed',
+        ...(metadata?.inspectionPhase
+          ? { inspectionPhase: metadata.inspectionPhase }
+          : {}),
+      });
     },
     async finalizeRecovery(_context, { execute, proofSucceeded }) {
       events.push('finalize:start');
@@ -231,6 +246,7 @@ function createHarness(options = {}) {
   const harness = {
     events,
     calls,
+    failureDetails,
     fixtureSignals,
     controller,
     context,
@@ -336,7 +352,10 @@ function loadRuntimeWithRealCollaborators(transport) {
   return module.exports;
 }
 
-function createRealCollaboratorTransport({ malformedReceipt = false } = {}) {
+function createRealCollaboratorTransport({
+  malformedReceipt = false,
+  invalidNetworkId = false,
+} = {}) {
   const { image, containerObservation, isolationNetwork, networkObservation } =
     observationFixtures();
   const calls = [];
@@ -418,9 +437,14 @@ function createRealCollaboratorTransport({ malformedReceipt = false } = {}) {
             stdout = '';
           }
         } else if (args[0] === 'inspect' && args.includes('--format')) {
-          stdout = JSON.stringify(
-            containerObservation(context, started ? 'running' : 'created'),
+          const observed = containerObservation(
+            context,
+            started ? 'running' : 'created',
           );
+          if (invalidNetworkId)
+            observed.NetworkSettings.Networks[context.name].NetworkID =
+              'd'.repeat(64);
+          stdout = JSON.stringify(observed);
         } else if (args[0] === 'network' && args[1] === 'inspect') {
           if (!networkCreated)
             throw Object.assign(new Error('Synthetic owned network absent'), {
@@ -656,6 +680,45 @@ it('composes the real fixture, planner, validators, receipt parser, and recovery
   ]);
 });
 
+it('retains a safe predicate through composite validation, runtime reporting, and manifest reopen', async (t) => {
+  const transport = createRealCollaboratorTransport({ invalidNetworkId: true });
+  t.after(() => removeSyntheticRecoveryRoot(transport.context));
+  const runtime = loadRuntimeWithRealCollaborators(transport);
+  const result = await runtime.runTrainingAccountPostgresProof();
+
+  assert.equal(result.passed, false);
+  assert.equal(result.proofSucceeded, false);
+  assert.equal(result.recoveryRetained, true);
+  assert.ok(
+    result.diagnostics.some(
+      (item) =>
+        item.stage === 'resource_inspect' &&
+        item.inspectionPhase === 'container_created' &&
+        item.inspectionPredicate === 'network_id',
+    ),
+  );
+  const manifestText = fs.readFileSync(
+    path.join(transport.context.root, 'recovery.json'),
+    'utf8',
+  );
+  assert.doesNotMatch(manifestText, /secret|credential|password|NetworkID/);
+  const recoveryPath =
+    require.resolve('./verify-training-accounts-postgres.cjs');
+  delete require.cache[recoveryPath];
+  const reopenedRecovery = require(recoveryPath);
+  assert.equal(
+    reopenedRecovery
+      .readRecoveryState(
+        reopenedRecovery.openRecoveryContext(transport.context.root),
+      )
+      .diagnostics.find((item) => item.inspectionPredicate === 'network_id')
+      ?.inspectionPhase,
+    'container_created',
+  );
+  delete require.cache[recoveryPath];
+  require(recoveryPath);
+});
+
 it('rejects unsupported platforms and server versions without claiming proof', async () => {
   for (const [configuration, expectedStage] of [
     [{ platform: 'darwin' }, 'image_inspect'],
@@ -698,6 +761,27 @@ it('waits for every failed proof stage before finalizing without claiming proof'
         harness.events.indexOf('finalize:start'),
       action,
     );
+  }
+});
+
+it('records the fixed resource inspection phase without assigning predicates to command errors', async () => {
+  for (const [action, phase, failAtOccurrence] of [
+    ['inspect_network', 'network_created'],
+    ['inspect_container', 'container_created'],
+    ['inspect_container', 'container_running', 2],
+  ]) {
+    const harness = createHarness({
+      failAt: action,
+      failAtOccurrence,
+    });
+    const runtime = loadRuntime(harness);
+    await runtime.runTrainingAccountPostgresProof();
+    const failure = harness.failureDetails.find(
+      (item) => item.stage === 'resource_inspect',
+    );
+    assert.equal(failure.metadata.inspectionPhase, phase);
+    assert.equal(failure.metadata.includeInspectionPredicate, false);
+    assert.equal(failure.error.inspectionPredicate, undefined);
   }
 });
 

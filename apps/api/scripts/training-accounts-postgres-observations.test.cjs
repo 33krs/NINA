@@ -857,3 +857,50 @@ it('rejects malformed observations and unprepared or changed private artifacts w
     { message: ISOLATION_REJECTION },
   );
 });
+
+it('attaches only fixed inspection predicates to existing isolation rejections', async () => {
+  const context = await preparedIsolationContext();
+  const validNetwork = isolationNetwork(context);
+  const baseline = containerObservation(context);
+  const cases = [
+    [
+      'network_id',
+      (value) => {
+        value.NetworkSettings.Networks[context.name].NetworkID = 'd'.repeat(64);
+      },
+    ],
+    [
+      'ports_shape',
+      (value) => {
+        value.NetworkSettings.Ports = [];
+      },
+    ],
+    [
+      'planned_bind_options',
+      (value) => {
+        value.HostConfig.Mounts[0].BindOptions = { NonRecursive: true };
+      },
+    ],
+    [
+      'actual_bind_mode',
+      (value) => {
+        value.Mounts.find((mount) => mount.Type === 'bind').Mode = 'rw';
+      },
+    ],
+  ];
+  for (const [predicate, change] of cases) {
+    const invalid = structuredClone(baseline);
+    change(invalid);
+    assert.throws(
+      () =>
+        validateTrainingPostgresIsolation(
+          context,
+          JSON.stringify(invalid),
+          JSON.stringify(validNetwork),
+          'running',
+        ),
+      (error) => error.inspectionPredicate === predicate,
+      predicate,
+    );
+  }
+});
