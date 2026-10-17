@@ -297,10 +297,7 @@ function validateActualMounts(mounts, proofSql) {
           ].includes(mount.Propagation))
       )
         return false;
-      if (
-        mount.Mode !== undefined &&
-        (typeof mount.Mode !== 'string' || !/(?:^|,)ro(?:,|$)/.test(mount.Mode))
-      )
+      if (mount.Mode !== undefined && !['', 'ro'].includes(mount.Mode))
         rejectMountObservation('actual_bind_mode');
       proofMounts += 1;
       if (proofMounts > 1) return false;

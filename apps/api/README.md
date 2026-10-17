@@ -181,6 +181,13 @@ volume metadata. Its frozen result contains only fixed ownership and safety
 metadata; it grants no cleanup authority and does not constitute live Docker
 evidence. The caller must serialize inspection against recovery finalization.
 
+For the actual bind observation, `Mode` may be absent, empty, or exactly `ro`;
+`RW` must still be `false`, and the planned mount must still be `ReadOnly: true`
+with the exact owned source and destination. This accepts Docker 29.7.2's
+structured read-only bind shape, which may report an empty `Mode`; the raw mode
+from the historical failed inspection was not retained or confirmed. Writable,
+compound, and unknown mode strings remain rejected.
+
 The command planner also exposes fixed `inspect_network`,
 `inspect_container`, and `server_version` operations. Resource inspection uses
 one formatted JSON object for the ownership validators. The version probe uses

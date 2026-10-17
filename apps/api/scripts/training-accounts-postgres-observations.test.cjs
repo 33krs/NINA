@@ -558,6 +558,94 @@ it('accepts registered container isolation only for created and running phases',
   );
 });
 
+it('accepts only absent, empty, or exact readonly actual bind modes without relaxing isolation', async () => {
+  const context = await preparedIsolationContext();
+  const allowedModes = [undefined, '', 'ro'];
+  const invariantBreakers = [
+    (container) => {
+      container.Mounts[0].RW = true;
+    },
+    (container) => {
+      delete container.Mounts[0].RW;
+    },
+    (container) => {
+      container.HostConfig.Mounts[0].ReadOnly = false;
+    },
+    (container) => {
+      delete container.HostConfig.Mounts[0].ReadOnly;
+    },
+    (container) => {
+      container.Mounts[0].Source = '/synthetic/foreign.sql';
+    },
+    (container) => {
+      container.Mounts[0].Destination = '/synthetic/foreign.sql';
+    },
+    (container) => {
+      container.HostConfig.Mounts[0].Source = '/synthetic/foreign.sql';
+    },
+    (container) => {
+      container.HostConfig.Mounts[0].Target = '/synthetic/foreign.sql';
+    },
+    (container) => {
+      container.HostConfig.Mounts.push({
+        ...container.HostConfig.Mounts[0],
+      });
+    },
+    (container) => {
+      container.Mounts.push({ ...container.Mounts[0] });
+    },
+  ];
+
+  for (const phase of ['created', 'running']) {
+    for (const mode of allowedModes) {
+      const valid = structuredClone(containerObservation(context, phase));
+      if (mode === undefined) delete valid.Mounts[0].Mode;
+      else valid.Mounts[0].Mode = mode;
+      assert.doesNotThrow(() =>
+        validateIsolation(
+          context,
+          valid,
+          isolationNetwork(context, phase),
+          phase,
+        ),
+      );
+
+      for (const breakInvariant of invariantBreakers) {
+        const invalid = structuredClone(valid);
+        breakInvariant(invalid);
+        assert.throws(
+          () =>
+            validateIsolation(
+              context,
+              invalid,
+              isolationNetwork(context, phase),
+              phase,
+            ),
+          { message: ISOLATION_REJECTION },
+          `${phase} with Mode ${String(mode)} must retain every other guard`,
+        );
+      }
+    }
+    for (const mode of [null, 17, 'rw', 'ro,rw', 'ro,mystery']) {
+      const invalid = containerObservation(context, phase);
+      invalid.Mounts[0].Mode = mode;
+      assert.throws(
+        () =>
+          validateIsolation(
+            context,
+            invalid,
+            isolationNetwork(context, phase),
+            phase,
+          ),
+        (error) =>
+          error.message === ISOLATION_REJECTION &&
+          error.inspectionPredicate === 'actual_bind_mode',
+        `${phase} must reject actual bind Mode ${String(mode)}`,
+      );
+    }
+  }
+});
+
 it('validates the exact SQL bind and tmpfs mount contract independently', async () => {
   const context = networkContext();
   recovery.writePrivateArtifact(context, 'proof_sql', 'SELECT 1;\n');
