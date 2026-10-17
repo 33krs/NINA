@@ -116,7 +116,7 @@ function trainingAccountPostgresCommand(context, fixture, operation) {
     case 'inspect_image':
       if (imageId !== null || container.id !== null || network.id !== null)
         invalidPlan();
-      return fixedArgs(['image', 'inspect', '--format', '{{.Id}}', IMAGE]);
+      return fixedArgs(['image', 'inspect', '--format', '{{json .}}', IMAGE]);
     case 'create_network':
       requirePreparedArtifacts(context, validated.artifacts);
       if (

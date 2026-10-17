@@ -83,7 +83,7 @@ it('plans fixed image inspection and immutable identity-bound creation commands'
     'image',
     'inspect',
     '--format',
-    '{{.Id}}',
+    '{{json .}}',
     'postgres:15-alpine',
   ]);
   assert.ok(networkArgs.includes('--label'));
