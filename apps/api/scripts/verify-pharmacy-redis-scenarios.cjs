@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { verifyLease } = require('./verify-pharmacy-redis-lease.cjs');
 const { readRedisProof } = require('./verify-pharmacy-redis-proof.cjs');
+const { writeResult } = require('./pharmacy-redis-result-channel.cjs');
 const { validateRedisProof } = require('./verify-pharmacy-redis-runtime.cjs');
 const { run, dockerArgs } = require('./verify-odontogram-postgres.cjs');
 const SAFE_PHASES = new Set([
@@ -79,7 +80,7 @@ const SAFE_VALUES = new Set([
   'fulfilled',
 ]);
 
-function emitDiagnostic(diagnostic) {
+function emitDiagnostic(diagnostic, diagnostics) {
   let snapshot;
   try {
     snapshot = {
@@ -100,6 +101,7 @@ function emitDiagnostic(diagnostic) {
     !SAFE_VALUES.has(snapshot.expected)
   )
     return false;
+  diagnostics.push(snapshot);
   console.error(
     `PHARMACY_REDIS_DIAGNOSTIC phase=${snapshot.phase} checkpoint=${snapshot.checkpoint} category=${snapshot.category} actual=${snapshot.actual} expected=${snapshot.expected}`,
   );
@@ -130,11 +132,12 @@ async function inspect(config, args) {
   return rows[0];
 }
 
-async function main(input) {
+async function main(input, onTerminalResult) {
   let phase = 'proof_read';
   let diagnosticEmitted = false;
   let failed = false;
   let failure;
+  const diagnostics = [];
   const clients = [];
   const services = [];
   try {
@@ -176,7 +179,8 @@ async function main(input) {
       second: services[1],
       key: `pharmacy:prescription:${config.proof.runId}`,
       onDiagnostic: (diagnostic) => {
-        diagnosticEmitted = emitDiagnostic(diagnostic) || diagnosticEmitted;
+        diagnosticEmitted =
+          emitDiagnostic(diagnostic, diagnostics) || diagnosticEmitted;
       },
     });
   } catch (error) {
@@ -192,13 +196,16 @@ async function main(input) {
         client_setup: 'client_setup',
         lease: 'lease',
       }[phase];
-      diagnosticEmitted = emitDiagnostic({
-        phase,
-        checkpoint,
-        category: 'operation_failed',
-        actual: 'unavailable',
-        expected: 'success',
-      });
+      diagnosticEmitted = emitDiagnostic(
+        {
+          phase,
+          checkpoint,
+          category: 'operation_failed',
+          actual: 'unavailable',
+          expected: 'success',
+        },
+        diagnostics,
+      );
     }
   }
   phase = 'cleanup';
@@ -217,23 +224,46 @@ async function main(input) {
       'Owned client cleanup failed',
     );
   } catch (error) {
-    emitDiagnostic({
-      phase: 'cleanup',
-      checkpoint: 'client_cleanup',
-      category: 'cleanup_failed',
-      actual: 'failed',
-      expected: 'fulfilled',
-    });
+    emitDiagnostic(
+      {
+        phase: 'cleanup',
+        checkpoint: 'client_cleanup',
+        category: 'cleanup_failed',
+        actual: 'failed',
+        expected: 'fulfilled',
+      },
+      diagnostics,
+    );
     failed = true;
     failure = error;
   }
-  if (failed) throw failure;
+  const publishResult = (result) => {
+    try {
+      onTerminalResult?.(result);
+    } catch {
+      // The result channel never changes assertion or cleanup outcomes.
+    }
+  };
+  if (failed) {
+    publishResult({ version: 1, result: 'failed', diagnostics });
+    throw failure;
+  }
+  publishResult({
+    version: 1,
+    result: 'passed',
+    redis_major: 7,
+    lease_ms: 10000,
+  });
   console.log('PHARMACY_REDIS_SCENARIOS_PASSED redis_major=7 lease_ms=10000');
 }
 
 if (require.main === module)
   Promise.resolve()
-    .then(() => main(parseArguments(process.argv.slice(2))))
+    .then(() =>
+      main(parseArguments(process.argv.slice(2)), (result) =>
+        writeResult(result),
+      ),
+    )
     .catch(() => {
       console.error('PHARMACY_REDIS_SCENARIOS_FAILED');
       process.exitCode = 1;

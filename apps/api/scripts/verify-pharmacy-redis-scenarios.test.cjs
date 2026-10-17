@@ -197,7 +197,13 @@ function scenario(t, fault) {
 
 test('valid guarded scenario uses exact inspections and cleans both clients', async (t) => {
   const { f, state, main } = scenario(t);
-  await main(f.input);
+  let result;
+  await main(f.input, (record) => {
+    result = record;
+    assert.ok(
+      state.clients.every((client) => !client.isOpen && client.destroyed),
+    );
+  });
   assert.equal(state.loads, 1);
   assert.equal(state.calls.length, 2);
   for (const [index, [command, args, options]] of state.calls.entries()) {
@@ -230,6 +236,15 @@ test('valid guarded scenario uses exact inspections and cleans both clients', as
     state.summary,
     'PHARMACY_REDIS_SCENARIOS_PASSED redis_major=7 lease_ms=10000',
   );
+  assert.equal(
+    JSON.stringify(result),
+    JSON.stringify({
+      version: 1,
+      result: 'passed',
+      redis_major: 7,
+      lease_ms: 10000,
+    }),
+  );
 });
 
 for (const [fault, message] of [
@@ -249,13 +264,36 @@ for (const [fault, message] of [
 
 test('scenario failure reports a fixed lease phase without leaking raw errors or proof data', async (t) => {
   const { f, state, main } = scenario(t, 'scenario');
-  await assert.rejects(main(f.input), /fixture scenario/);
+  let result;
+  await assert.rejects(
+    main(f.input, (record) => {
+      result = record;
+      assert.ok(state.clients.every((client) => !client.isOpen));
+    }),
+    /fixture scenario/,
+  );
   assert.deepEqual(state.diagnostics, [
     'PHARMACY_REDIS_DIAGNOSTIC phase=lease checkpoint=lease category=operation_failed actual=unavailable expected=success',
   ]);
   assert.doesNotMatch(
     state.diagnostics.join('\n'),
     new RegExp(`fixture scenario|${f.password}|${f.proof.redisUrl}`),
+  );
+  assert.equal(
+    JSON.stringify(result),
+    JSON.stringify({
+      version: 1,
+      result: 'failed',
+      diagnostics: [
+        {
+          phase: 'lease',
+          checkpoint: 'lease',
+          category: 'operation_failed',
+          actual: 'unavailable',
+          expected: 'success',
+        },
+      ],
+    }),
   );
 });
 
