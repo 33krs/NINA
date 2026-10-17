@@ -161,6 +161,18 @@ its own bounded deadline, independent of an aborted creation signal. Unit execut
 doubles establish these state transitions, not disposable Docker cleanup proof.
 No standalone entrypoint or disposable runner is wired yet.
 
+### Disposable Redis fixture foundation
+
+The import-only `pharmacy-redis-runner-fixture.cjs` prepares fresh private
+mode-0700 storage, mode-0600 authentication/proof files and UUID-bound creation
+arguments for the pinned cached image. Credentials stay out of argv and the
+controlled environment; disposal removes only its two known files.
+
+This component does not execute Docker, load Redis clients or grant connection
+authority. Its direct tests use a shared VM fixture without live services.
+The orchestrator and package command remain unwired; actual disposable Redis,
+lease-expiry and cleanup proof require the next authorized integration slice.
+
 ### Calendar-date batch expiry
 
 `isBatchExpired(expirationLabel, evaluationInstant)` is a pure policy helper.
