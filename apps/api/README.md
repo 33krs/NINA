@@ -143,6 +143,13 @@ all opened clients, including partial startup failures; CLI errors are generic.
 Disposable orchestration, actual Redis execution and exact resource cleanup proof
 remain pending. VM startup tests are safety evidence, not live Redis proof.
 
+`pharmacy-redis-resource-identity.cjs` is an import-only context/observation
+contract. It checks canonical private-root/run/image inputs, exact Redis resource
+names/labels/image identity and target-specific absence errors. These predicates
+neither inspect Docker nor grant removal authority. Its shared synthetic fixture
+creates only an empty private directory and metadata, never authentication files.
+Creation tracking and reconciliation are not wired in this intermediate slice.
+
 ### Calendar-date batch expiry
 
 `isBatchExpired(expirationLabel, evaluationInstant)` is a pure policy helper.
