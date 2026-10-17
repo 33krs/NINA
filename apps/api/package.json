@@ -7,13 +7,16 @@
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
     "test": "jest",
+    "test:pharmacy:postgres": "node scripts/verify-odontogram-postgres.cjs --suite=pharmacy-ledger",
     "test:odontogram:postgres": "node scripts/verify-odontogram-postgres.cjs",
     "lint": "eslint \"src/**/*.ts\""
   },
   "jest": {
     "preset": "ts-jest",
     "testEnvironment": "node",
-    "roots": ["<rootDir>/src"]
+    "roots": [
+      "<rootDir>/src"
+    ]
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",

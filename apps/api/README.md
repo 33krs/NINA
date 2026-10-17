@@ -71,8 +71,33 @@ remain future work. Partial delivery and blocking expired lots were selected;
 the exact expiration cutoff is a later eligibility decision. This unit adds no
 endpoint, operator identity, expiry filter, stock mutation, or RabbitMQ flow.
 
-Verification for this unit covers deterministic helper tests, Prisma
-validation/generation, an offline schema SQL comparison, and structural review
-of the custom check/triggers. No live migration or database check was run;
-trigger/foreign-key behavior and concurrent dispensing still need authorized
-runtime proof before service integration.
+### Isolated PostgreSQL 15 ledger proof
+
+Run `npm run test:pharmacy:postgres --workspace=@nina/api` with an already-cached
+`postgres:15-alpine` image and local Docker. It reuses the owned-resource runner;
+no arguments still selects the unchanged odontogram suite. Unknown arguments
+fail before resource creation. No real or ambient database is used.
+
+The pharmacy suite creates random database/user/password values, passes them in
+an exclusive mode-0600 temporary env-file and uses SCRAM host authentication.
+Passwords and the generated datasource are redacted from subprocess failures;
+credentials never appear in argv or saved proof output. Temporary storage and
+only exact inspected, labelled run-owned container/network IDs are cleaned up.
+The dedicated bridge permits outbound traffic; the published host port is
+loopback-only, data is tmpfs and image pulls remain disabled.
+
+Predecessor migrations deploy first; synthetic ISSUED, DISPENSED and CANCELLED
+prescriptions are snapshotted with quantities, stock and timestamps. After the
+ledger migration, the snapshot must match and both ledger tables must be empty.
+SQL scenarios check successful multiple events/default timestamps, four specific
+FKs, zero/negative quantity checks, duplicate tuples, both tables' UPDATE/DELETE
+triggers and referenced parents' DELETE/identity restrictions. Every rejection
+checks its SQLSTATE/constraint (or exact trigger message) and unchanged history.
+To prove the event-to-allocation FK separately from its masking append-only
+trigger, only that trigger is disabled inside a rolled-back fixture transaction;
+its restored guard is then checked again.
+
+This proves migration constraints, not cross-medication/prescription matching,
+expiry eligibility, service transactions, concurrency or administrator resistance.
+The existing deterministic helper tests and offline Prisma checks remain useful;
+run the isolated command before claiming live database proof.

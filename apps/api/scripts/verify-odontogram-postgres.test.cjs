@@ -6,6 +6,9 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const {
   dockerArgs,
+  parseSuite,
+  writePostgresEnvironment,
+  copyMigrationStage,
   ownedContainerId,
   reconcileOwnedResources,
   createCancellation,
@@ -57,6 +60,15 @@ else if (args[0] === 'network' && args[1] === 'create') {
   }));
   console.log('owned-network');
 } else if (args[0] === 'create') {
+  if (options.suite) {
+    const envFile = args[args.indexOf('--env-file') + 1];
+    if (!envFile || (fs.statSync(envFile).mode & 0o777) !== 0o600) throw new Error('credentials are not private');
+    const env = fs.readFileSync(envFile, 'utf8');
+    const secret = env.match(/^POSTGRES_PASSWORD=(.+)$/m)?.[1];
+    if (!secret || args.some(arg => arg.includes(secret) || arg.includes('trust')) ||
+      !env.includes('POSTGRES_HOST_AUTH_METHOD=scram-sha-256')) throw new Error('unsafe credential delivery');
+    if (process.env.DATABASE_URL || process.env.PGHOST || process.env.SSH_AUTH_SOCK) throw new Error('ambient credentials escaped allowlist');
+  }
   fs.writeFileSync(file('container'), JSON.stringify({
     Id: 'owned-container', Name: '/' + args[args.indexOf('--name') + 1],
     Config: { Image: 'postgres:15-alpine', Labels: labels() }
@@ -113,6 +125,8 @@ for (const [signal, phase, exitCode, options = {}] of [
   ['SIGTERM', 'start', 143, { descendant: true }],
   ['SIGINT', 'start', 130, { cleanup: true }],
   ['SIGTERM', 'start', 143, { cleanup: true }],
+  ['SIGINT', 'create', 130, { suite: 'pharmacy-ledger' }],
+  ['SIGTERM', 'start', 143, { suite: 'pharmacy-ledger' }],
 ]) {
   const scenario = options.cleanup
     ? 'during cleanup preserves resource removal'
@@ -142,9 +156,16 @@ for (const [signal, phase, exitCode, options = {}] of [
       [
         ...(options.cleanup ? ['--require', observer] : []),
         path.join(__dirname, 'verify-odontogram-postgres.cjs'),
+        ...(options.suite ? [`--suite=${options.suite}`] : []),
       ],
       {
-        env: { PATH: root, HOME: root },
+        env: {
+          PATH: root,
+          HOME: root,
+          DATABASE_URL: 'postgresql://ambient.invalid/database',
+          PGHOST: 'ambient.invalid',
+          SSH_AUTH_SOCK: '/ambient/socket',
+        },
       },
     );
     let result;
@@ -646,5 +667,112 @@ test('isolated Prisma client paths stay in runner temp storage and never resolve
       tempRoot: '/tmp/nina-odontogram-pg15-run',
       schemaEnvPath: '/repo/apps/api/.env',
     }),
+  );
+});
+
+test('suite selection rejects unknown or additional arguments before resources', async () => {
+  assert.equal(parseSuite([]), 'odontogram');
+  assert.equal(parseSuite(['--suite=pharmacy-ledger']), 'pharmacy-ledger');
+  for (const args of [
+    ['--suite=other'],
+    ['--suite=odontogram'],
+    ['--suite=pharmacy-ledger', 'extra'],
+  ]) {
+    assert.throws(() => parseSuite(args), /Unsupported/);
+  }
+  await assert.rejects(
+    run(
+      process.execPath,
+      [path.join(__dirname, 'verify-odontogram-postgres.cjs'), '--suite=other'],
+      { env: { PATH: '/nonexistent' } },
+    ),
+    /Unsupported/,
+  );
+});
+
+test('pharmacy credentials use a private exclusive file without password argv', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-auth-test-'));
+  try {
+    const file = writePostgresEnvironment(
+      root,
+      'db_random',
+      'user_random',
+      'random_secret',
+    );
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    assert.equal(
+      fs.readFileSync(file, 'utf8'),
+      'POSTGRES_DB=db_random\nPOSTGRES_USER=user_random\nPOSTGRES_PASSWORD=random_secret\nPOSTGRES_HOST_AUTH_METHOD=scram-sha-256\nPOSTGRES_INITDB_ARGS=--auth-host=scram-sha-256\nPGPASSWORD=random_secret\n',
+    );
+    assert.throws(
+      () => writePostgresEnvironment(root, 'db', 'user', 'secret'),
+      { code: 'EEXIST' },
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('pharmacy migration stage omits only ledger then adds it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-stage-test-'));
+  const apiRoot = path.resolve(__dirname, '..');
+  const ledger = '20261010140000_add_prescription_dispensing';
+  try {
+    copyMigrationStage(apiRoot, root, false, 'pharmacy-ledger');
+    const names = fs
+      .readdirSync(path.join(root, 'prisma', 'migrations'))
+      .sort();
+    assert.deepEqual(
+      names,
+      fs
+        .readdirSync(path.join(apiRoot, 'prisma', 'migrations'))
+        .filter((name) => name !== ledger)
+        .sort(),
+    );
+    assert.equal(fs.existsSync(path.join(root, 'prisma', '.env')), false);
+    copyMigrationStage(apiRoot, root, true, 'pharmacy-ledger');
+    assert.ok(
+      fs.existsSync(
+        path.join(root, 'prisma', 'migrations', ledger, 'migration.sql'),
+      ),
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('all subprocess error fields redact fresh passwords and datasource URLs', async () => {
+  const secret = 'fresh_secret';
+  const url = `postgresql://user:${secret}@127.0.0.1:5432/random`;
+  const redactions = [secret, url];
+  await assert.rejects(
+    run(
+      process.execPath,
+      [
+        '-e',
+        `console.error(${JSON.stringify(url + ' ' + secret)}); process.exit(7)`,
+      ],
+      { redactions },
+    ),
+    (error) => {
+      assert.equal(error.status, 7);
+      assert.doesNotMatch(
+        error.message + error.stderr + error.stack,
+        /fresh_secret|postgresql:/,
+      );
+      assert.match(error.stderr, /REDACTED/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    run(`/nonexistent/${secret}`, [], { redactions }),
+    (error) => {
+      assert.equal(error.code, 'ENOENT');
+      assert.doesNotMatch(
+        error.message + error.stderr + error.stack,
+        /fresh_secret/,
+      );
+      return true;
+    },
   );
 });
