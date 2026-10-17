@@ -35,6 +35,19 @@ applied to any database. No account rows, default credentials, or administrator
 are seeded. `authVersion` is only groundwork for future revocation; no session
 or authentication behavior is implemented here.
 
+## Training-account PostgreSQL recovery foundation (import-only)
+
+`scripts/verify-training-accounts-postgres.cjs` contains import-only recovery
+helpers, not a command or database runner. It records only fixed stage/reason
+codes, bounded process status, and allowlisted SQLSTATE/Node codes in a private
+recovery manifest. Resource removal requires independent inspection of the
+factory-created run identity, exact image ID, labels, and name; uncertain or
+foreign resources retain the private evidence. Creation calls are tracked until
+settled; cleanup waits for them before inspecting or removing resources. A pass
+requires successful proof and confirmed cleanup. Cleanup executor calls receive
+a fixed five-second bound and no proof-abort signal. Its tests use synthetic
+executors only; they do not connect to PostgreSQL or invoke Docker.
+
 Run the ordinary API checks with `npm --workspace @nina/api test` and
 `npm --workspace @nina/api run lint`.
 
