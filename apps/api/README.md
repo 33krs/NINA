@@ -141,6 +141,10 @@ rejected observations use a fixed generic error. This confirms inspected tag
 metadata association only. It does not establish publisher provenance or the
 version of a running database server, and does not execute Docker.
 
+Image `Config.User` may be omitted or explicitly empty; any other explicit value
+is rejected. This image-metadata rule does not relax the separate container
+isolation requirement that the actual container `Config.User` is exactly `0`.
+
 The same module's `validateTrainingPostgresNetwork()` checks one bounded
 network-inspection object against a factory-owned recovery context. It requires
 the registered network ID/name, exact owner/run labels, an internal bridge,
