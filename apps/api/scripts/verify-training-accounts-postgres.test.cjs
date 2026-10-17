@@ -12,6 +12,7 @@ const {
   reconcileOwnedResources,
   readRecoveryState,
   reportFailure,
+  writePrivateArtifact,
 } = require('./verify-training-accounts-postgres.cjs');
 
 const IMAGE_ID = `sha256:${'a'.repeat(64)}`;
@@ -124,6 +125,118 @@ describe('training account PostgreSQL recovery foundation', () => {
     assert.throws(() => openRecoveryContext(path.join(first.root, '..')));
   });
 
+  it('writes only fixed private artifacts and persists non-content identity metadata', () => {
+    const context = createContext();
+    const proof = 'SELECT 1;';
+    const environment = 'PGHOST=127.0.0.1\n';
+
+    writePrivateArtifact(context, 'proof_sql', proof);
+    writePrivateArtifact(context, 'postgres_env', environment);
+
+    for (const [name, content] of [
+      ['proof.sql', proof],
+      ['postgres.env', environment],
+    ]) {
+      const filename = path.join(context.root, name);
+      const stat = fs.lstatSync(filename);
+      assert.equal(stat.isFile(), true);
+      assert.equal(stat.isSymbolicLink(), false);
+      assert.equal(stat.nlink, 1);
+      assert.equal(stat.mode & 0o777, 0o600);
+      assert.equal(fs.readFileSync(filename, 'utf8'), content);
+    }
+
+    const manifestText = fs.readFileSync(context.manifestPath, 'utf8');
+    assert.equal(manifestText.includes(proof), false);
+    assert.equal(manifestText.includes(environment), false);
+    assert.deepEqual(Object.keys(readRecoveryState(context).artifacts).sort(), [
+      'postgres_env',
+      'proof_sql',
+    ]);
+  });
+
+  it('rejects a symlink-replaced recovery root before persisting artifact intent', () => {
+    const context = createContext();
+    const originalRoot = context.root;
+    const movedRoot = `${originalRoot}-moved`;
+    const manifest = fs.readFileSync(context.manifestPath);
+    fs.renameSync(originalRoot, movedRoot);
+    fs.symlinkSync(movedRoot, originalRoot);
+
+    assert.throws(
+      () => writePrivateArtifact(context, 'proof_sql', 'SELECT 1;'),
+      /Private recovery directory required/,
+    );
+    assert.deepEqual(
+      fs.readFileSync(path.join(movedRoot, 'recovery.json')),
+      manifest,
+    );
+    assert.equal(fs.existsSync(path.join(movedRoot, 'proof.sql')), false);
+  });
+
+  it('rejects forged contexts, unknown kinds, invalid content, and duplicate writes', () => {
+    const context = createContext();
+    const write = () => writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    assert.throws(() => writePrivateArtifact({}, 'proof_sql', 'x'));
+    assert.throws(() => writePrivateArtifact(context, '../recovery.json', 'x'));
+    assert.throws(() =>
+      writePrivateArtifact(context, 'proof_sql', Buffer.from('x')),
+    );
+    assert.throws(() =>
+      writePrivateArtifact(context, 'proof_sql', 'x'.repeat(16 * 1024 + 1)),
+    );
+    assert.throws(() =>
+      writePrivateArtifact(context, 'postgres_env', 'x'.repeat(4 * 1024 + 1)),
+    );
+    assert.throws(() =>
+      writePrivateArtifact(context, 'proof_sql', '💡'.repeat(5 * 1024)),
+    );
+    write();
+    assert.throws(write);
+  });
+
+  it('retains an exclusive-create collision without adopting its file', async () => {
+    const context = createContext();
+    const world = await captureOwnedPair(context);
+    const filename = path.join(context.root, 'proof.sql');
+    fs.writeFileSync(filename, 'foreign evidence', { mode: 0o600, flag: 'wx' });
+    assert.throws(
+      () => writePrivateArtifact(context, 'proof_sql', 'SELECT 1;'),
+      /Private artifact write failed/,
+    );
+    assert.equal(fs.readFileSync(filename, 'utf8'), 'foreign evidence');
+    assert.equal(
+      readRecoveryState(context).artifacts.proof_sql.state,
+      'intent',
+    );
+    const result = await finalizeRecovery(context, {
+      execute: world.execute,
+      proofSucceeded: true,
+    });
+    assert.equal(result.passed, false);
+    assert.equal(result.recoveryRetained, true);
+    assert.equal(fs.readFileSync(filename, 'utf8'), 'foreign evidence');
+  });
+
+  it('reopens artifact identity after a fresh module load', () => {
+    const context = createContext();
+    writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    writePrivateArtifact(context, 'postgres_env', 'PGHOST=127.0.0.1\n');
+    const modulePath =
+      require.resolve('./verify-training-accounts-postgres.cjs');
+    delete require.cache[modulePath];
+    const reopenedModule = require('./verify-training-accounts-postgres.cjs');
+    const reopened = reopenedModule.openRecoveryContext(context.root);
+    assert.deepEqual(
+      reopenedModule.readRecoveryState(reopened).artifacts.proof_sql,
+      readRecoveryState(context).artifacts.proof_sql,
+    );
+    assert.deepEqual(
+      reopenedModule.readRecoveryState(reopened).artifacts.postgres_env,
+      readRecoveryState(context).artifacts.postgres_env,
+    );
+  });
+
   it('opens legacy version-one manifests as empty artifact inventories without adoption', () => {
     const context = createContext();
     const legacy = JSON.parse(fs.readFileSync(context.manifestPath, 'utf8'));
@@ -140,27 +253,117 @@ describe('training account PostgreSQL recovery foundation', () => {
     const reopened = reopenedModule.openRecoveryContext(context.root);
     const state = reopenedModule.readRecoveryState(reopened);
     assert.equal(state.version, 2);
-    assert.deepEqual(state.artifacts, { proof_sql: null, postgres_env: null });
+    assert.deepEqual(state.artifacts, {
+      proof_sql: null,
+      postgres_env: null,
+    });
+    reopenedModule.writePrivateArtifact(reopened, 'proof_sql', 'SELECT 1;');
+    assert.equal(
+      reopenedModule.readRecoveryState(reopened).artifacts.proof_sql.state,
+      'complete',
+    );
   });
 
-  it('rejects a replaced private manifest before persisting a recovery update', () => {
+  it('rejects a changed completed artifact when reopening its recovery root', () => {
     const context = createContext();
-    const original = fs.readFileSync(context.manifestPath);
-    fs.renameSync(
-      context.manifestPath,
-      path.join(context.root, 'manifest-copy'),
+    writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    const artifact = path.join(context.root, 'proof.sql');
+    fs.unlinkSync(artifact);
+    fs.writeFileSync(artifact, 'replacement', { mode: 0o600, flag: 'wx' });
+
+    const modulePath =
+      require.resolve('./verify-training-accounts-postgres.cjs');
+    delete require.cache[modulePath];
+    const reopenedModule = require('./verify-training-accounts-postgres.cjs');
+    assert.throws(
+      () => reopenedModule.openRecoveryContext(context.root),
+      /Private artifact identity changed/,
     );
-    fs.writeFileSync(context.manifestPath, original, {
+    assert.equal(fs.readFileSync(artifact, 'utf8'), 'replacement');
+  });
+
+  it('writes artifact contents with one bounded filesystem write', () => {
+    const context = createContext();
+    const originalWriteSync = fs.writeSync;
+    let writes = 0;
+    fs.writeSync = (...args) => {
+      writes++;
+      return originalWriteSync(...args);
+    };
+    try {
+      writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    } finally {
+      fs.writeSync = originalWriteSync;
+    }
+    assert.equal(writes, 1);
+  });
+
+  it('retains incomplete artifact intent after durable metadata persistence fails', async () => {
+    const context = createContext();
+    const originalRename = fs.renameSync;
+    let manifestRenames = 0;
+    fs.renameSync = function (source, destination) {
+      if (destination === context.manifestPath && ++manifestRenames === 3)
+        throw new Error('synthetic manifest failure');
+      return originalRename.call(this, source, destination);
+    };
+    try {
+      assert.throws(
+        () => writePrivateArtifact(context, 'proof_sql', 'SELECT 1;'),
+        /Private artifact write failed/,
+      );
+    } finally {
+      fs.renameSync = originalRename;
+    }
+    const filename = path.join(context.root, 'proof.sql');
+    assert.equal(fs.existsSync(filename), true);
+
+    const modulePath =
+      require.resolve('./verify-training-accounts-postgres.cjs');
+    delete require.cache[modulePath];
+    const reopenedModule = require('./verify-training-accounts-postgres.cjs');
+    const reopened = reopenedModule.openRecoveryContext(context.root);
+    assert.equal(
+      reopenedModule.readRecoveryState(reopened).artifacts.proof_sql.state,
+      'owned',
+    );
+    const world = fakeDocker(context);
+    const result = await reopenedModule.finalizeRecovery(reopened, {
+      execute: world.execute,
+      proofSucceeded: true,
+    });
+    assert.equal(result.passed, false);
+    assert.equal(result.recoveryRetained, true);
+    assert.equal(fs.existsSync(filename), true);
+  });
+
+  it('retains a persisted creation intent after reopening an interrupted write', async () => {
+    const context = createContext();
+    const world = await captureOwnedPair(context);
+    const manifest = JSON.parse(fs.readFileSync(context.manifestPath, 'utf8'));
+    manifest.artifacts.proof_sql = {
+      state: 'intent',
+      dev: null,
+      ino: null,
+      size: null,
+    };
+    fs.writeFileSync(context.manifestPath, JSON.stringify(manifest), {
       mode: 0o600,
-      flag: 'wx',
     });
 
-    assert.throws(
-      () =>
-        reportFailure(context, 'sql_assertion', new Error('synthetic failure')),
-      /Recovery manifest write failed/,
-    );
-    assert.deepEqual(fs.readFileSync(context.manifestPath), original);
+    const modulePath =
+      require.resolve('./verify-training-accounts-postgres.cjs');
+    delete require.cache[modulePath];
+    const reopenedModule = require('./verify-training-accounts-postgres.cjs');
+    const reopened = reopenedModule.openRecoveryContext(context.root);
+    const result = await reopenedModule.finalizeRecovery(reopened, {
+      execute: world.execute,
+      proofSucceeded: true,
+    });
+    assert.equal(result.passed, false);
+    assert.equal(result.recoveryRetained, true);
+    assert.equal(fs.existsSync(context.manifestPath), true);
+    assert.equal(fs.existsSync(path.join(context.root, 'proof.sql')), false);
   });
 
   it('reopens only a valid private recovery manifest', async () => {
@@ -716,6 +919,56 @@ describe('training account PostgreSQL recovery foundation', () => {
         ['network', 'rm', NETWORK_ID],
       ],
     );
+  });
+
+  it('retains both private artifacts whenever proof has not succeeded', async () => {
+    const context = createContext();
+    const world = await captureOwnedPair(context);
+    writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    writePrivateArtifact(context, 'postgres_env', 'PGHOST=127.0.0.1\n');
+    const result = await finalizeRecovery(context, {
+      execute: world.execute,
+      proofSucceeded: false,
+    });
+    assert.equal(result.passed, false);
+    assert.equal(result.recoveryRetained, true);
+    assert.equal(fs.existsSync(path.join(context.root, 'proof.sql')), true);
+    assert.equal(fs.existsSync(path.join(context.root, 'postgres.env')), true);
+  });
+
+  it('retains both private artifacts whenever owned-resource cleanup is incomplete', async () => {
+    const context = createContext();
+    const world = await captureOwnedPair(
+      context,
+      fakeDocker(context, resourceRows(context), {
+        removeContainerError: new Error('synthetic removal failure'),
+      }),
+    );
+    writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    writePrivateArtifact(context, 'postgres_env', 'PGHOST=127.0.0.1\n');
+    const result = await finalizeRecovery(context, {
+      execute: world.execute,
+      proofSucceeded: true,
+    });
+    assert.equal(result.passed, false);
+    assert.equal(result.cleanupConfirmed, false);
+    assert.equal(result.recoveryRetained, true);
+    assert.equal(fs.existsSync(path.join(context.root, 'proof.sql')), true);
+    assert.equal(fs.existsSync(path.join(context.root, 'postgres.env')), true);
+  });
+
+  it('retains completed artifacts until inventory-checked disposal is integrated', async () => {
+    const context = createContext();
+    const world = await captureOwnedPair(context);
+    writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    const result = await finalizeRecovery(context, {
+      execute: world.execute,
+      proofSucceeded: true,
+    });
+    assert.equal(result.passed, false);
+    assert.equal(result.cleanupConfirmed, true);
+    assert.equal(result.recoveryRetained, true);
+    assert.equal(fs.existsSync(path.join(context.root, 'proof.sql')), true);
   });
 
   it('passes and disposes private evidence only after proof success and confirmed cleanup', async () => {

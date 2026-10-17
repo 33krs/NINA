@@ -446,13 +446,138 @@ function openRecoveryContext(root) {
     pending: new Set(),
     finalizing: false,
   };
+  verifyArtifactRecords(state);
   activeRoots.set(root, state);
   return contextFor(state);
+}
+
+function verifyArtifactRecords(state) {
+  for (const kind of Object.keys(ARTIFACTS)) {
+    const record = state.manifest.artifacts[kind];
+    const filename = path.join(state.root, ARTIFACTS[kind].filename);
+    let stat;
+    try {
+      stat = fs.lstatSync(filename);
+    } catch (error) {
+      if (error && error.code === 'ENOENT' && record?.state !== 'complete')
+        continue;
+      fail('Private artifact identity changed');
+    }
+    if (
+      !record ||
+      stat.isSymbolicLink() ||
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      (stat.mode & 0o777) !== 0o600 ||
+      (currentUid() !== undefined && stat.uid !== currentUid()) ||
+      stat.size > ARTIFACTS[kind].maxBytes ||
+      (record.state !== 'intent' &&
+        (stat.dev !== record.dev || stat.ino !== record.ino)) ||
+      (record.state === 'complete' && stat.size !== record.size)
+    )
+      fail('Private artifact identity changed');
+  }
 }
 
 function readRecoveryState(context) {
   const state = getState(context);
   return Object.freeze(JSON.parse(JSON.stringify(state.manifest)));
+}
+
+function writePrivateArtifact(context, kind, content) {
+  const state = getState(context);
+  verifyPrivateRoot(state.root);
+  const artifact =
+    typeof kind === 'string' && Object.hasOwn(ARTIFACTS, kind)
+      ? ARTIFACTS[kind]
+      : undefined;
+  if (
+    state.finalizing ||
+    !artifact ||
+    typeof content !== 'string' ||
+    content.length === 0 ||
+    content.length > artifact.maxBytes
+  )
+    fail('Private artifact write failed');
+  const bytes = Buffer.from(content, 'utf8');
+  if (bytes.length === 0 || bytes.length > artifact.maxBytes)
+    fail('Private artifact write failed');
+  const previous = state.manifest.artifacts[kind];
+  if (previous !== null) fail('Private artifact write failed');
+
+  state.manifest.artifacts[kind] = {
+    state: 'intent',
+    dev: null,
+    ino: null,
+    size: null,
+  };
+  try {
+    writeManifest(state);
+  } catch {
+    fail('Private artifact write failed');
+  }
+
+  const filename = path.join(state.root, artifact.filename);
+  let descriptor;
+  try {
+    descriptor = fs.openSync(filename, 'wx', 0o600);
+    const opened = fs.fstatSync(descriptor);
+    if (
+      !opened.isFile() ||
+      opened.nlink !== 1 ||
+      (opened.mode & 0o777) !== 0o600 ||
+      (currentUid() !== undefined && opened.uid !== currentUid())
+    )
+      fail('Private artifact write failed');
+
+    const directory = fs.openSync(state.root, 'r');
+    try {
+      fs.fsyncSync(directory);
+    } finally {
+      fs.closeSync(directory);
+    }
+
+    const owned = {
+      state: 'owned',
+      dev: opened.dev,
+      ino: opened.ino,
+      size: bytes.length,
+    };
+    state.manifest.artifacts[kind] = owned;
+    writeManifest(state);
+
+    const written = fs.writeSync(descriptor, bytes, 0, bytes.length, 0);
+    if (written !== bytes.length) fail('Private artifact write failed');
+    fs.fsyncSync(descriptor);
+    const completed = fs.fstatSync(descriptor);
+    if (
+      completed.dev !== owned.dev ||
+      completed.ino !== owned.ino ||
+      completed.size !== bytes.length ||
+      completed.nlink !== 1 ||
+      (completed.mode & 0o777) !== 0o600 ||
+      (currentUid() !== undefined && completed.uid !== currentUid())
+    )
+      fail('Private artifact write failed');
+
+    state.manifest.artifacts[kind] = { ...owned, state: 'complete' };
+    try {
+      writeManifest(state);
+    } catch {
+      state.manifest.artifacts[kind] = owned;
+      fail('Private artifact write failed');
+    }
+  } catch {
+    fail('Private artifact write failed');
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        /* preserve the generic artifact result */
+      }
+    }
+  }
 }
 
 function readOnce(value, key) {
@@ -777,8 +902,14 @@ async function reconcileOwnedResources(context, { execute } = {}) {
 
 function disposePrivateStorage(state) {
   verifyPrivateRoot(state.root);
-  if (Object.values(state.manifest.artifacts).some(Boolean))
-    fail('Private artifacts are retained in this slice');
+  const currentEntries = fs.readdirSync(state.root);
+  if (
+    Object.values(state.manifest.artifacts).some(Boolean) ||
+    currentEntries.some((name) =>
+      Object.values(ARTIFACTS).some((artifact) => artifact.filename === name),
+    )
+  )
+    fail('Private artifacts are retained until disposal is integrated');
   for (const kind of Object.keys(ARTIFACTS)) {
     const record = state.manifest.artifacts[kind];
     if (record && record.state !== 'complete')
@@ -913,4 +1044,5 @@ module.exports = {
   readRecoveryState,
   reconcileOwnedResources,
   reportFailure,
+  writePrivateArtifact,
 };
