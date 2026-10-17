@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
 const shared = require('./verify-odontogram-postgres.cjs');
 const resources = require('./pharmacy-redis-resources.cjs');
+const resultChannel = require('./pharmacy-redis-result-channel.cjs');
 const { readRedisProof } = require('./verify-pharmacy-redis-proof.cjs');
 const imageId =
   'sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499';
@@ -125,6 +126,66 @@ function load(t, options, fixtureOnly) {
       }
       if (id === './verify-odontogram-postgres.cjs')
         return { ...shared, run: execute };
+      if (id === './pharmacy-redis-result-channel.cjs')
+        return {
+          validateDiagnostics: resultChannel.validateDiagnostics,
+          runScenarioChild: async (settings) => {
+            settings.guard?.();
+            calls.push({
+              command: processDouble.execPath,
+              args: [
+                path.join(__dirname, 'verify-pharmacy-redis-scenarios.cjs'),
+                `--run-id=${settings.runId}`,
+                `--proof-file=${settings.proofFile}`,
+              ],
+              settings: {
+                ...settings,
+                stdio: ['ignore', 'ignore', 'ignore', 'pipe'],
+              },
+            });
+            events.push('child');
+            pending++;
+            try {
+              if (options.cancel === 'child')
+                processDouble.emit(options.signal ?? 'SIGINT');
+              if (options.fail === 'child')
+                throw Error('synthetic private failure');
+              let record;
+              if (Object.hasOwn(options, 'childRecordBytes')) {
+                try {
+                  record = resultChannel.decodeResult(options.childRecordBytes);
+                } catch {
+                  const error = Error('Synthetic invalid result channel');
+                  error.code = 'EPROTO';
+                  error.status = options.childStatus ?? 1;
+                  throw error;
+                }
+              } else if (Object.hasOwn(options, 'childRecord')) {
+                if (!options.childRecord) throw Error('Invalid result record');
+                record = resultChannel.decodeResult(
+                  resultChannel.encodeResult(options.childRecord),
+                );
+              } else
+                record = {
+                  version: 1,
+                  result: 'passed',
+                  redis_major: 7,
+                  lease_ms: 10000,
+                };
+              const status =
+                options.childStatus ?? (record.result === 'failed' ? 1 : 0);
+              if (record.result === 'passed' && status === 0) return record;
+              const error = Error('Synthetic child result failure');
+              error.status = status;
+              if (record.result === 'failed' && status !== 0)
+                error.diagnostics = record.diagnostics;
+              throw error;
+            } finally {
+              pending--;
+              settings.guard?.();
+            }
+          },
+        };
       if (id === './pharmacy-redis-resources.cjs')
         return {
           createResourceTracker: resources.createResourceTracker,

@@ -6,6 +6,7 @@ const { spawnSync } = require('node:child_process');
 const {
   loadRunner: load,
 } = require('./pharmacy-redis-runner-test-fixture.cjs');
+const { reportStageFailure } = require('./verify-pharmacy-redis.cjs');
 const source = path.join(__dirname, 'verify-pharmacy-redis.cjs');
 const imageId =
   'sha256:858f009f9709ce576febc734aa78b8f6d624b82571f9ddb6bda4377c833b3499';
@@ -218,28 +219,54 @@ for (const cancel of ['create', 'readiness', 'child'])
     assert.ok(f.output.every((line) => !line.includes('SUITE_PASSED')));
   });
 
-test('child must return its exact scenario completion marker', async (t) => {
-  const f = load(t, { childOutput: 'not a completed proof' });
+test('child output cannot spoof a missing result-channel record', async (t) => {
+  const f = load(t, {
+    childOutput: 'PHARMACY_REDIS_SCENARIOS_PASSED redis_major=7 lease_ms=10000',
+    childRecord: null,
+  });
   await assert.rejects(f.api.main(['--isolated']), /verification/);
   assert.equal(f.events.at(-1), 'cleanup');
   assert.ok(
     f.output.includes(
-      'PHARMACY_REDIS_STAGE_FAILED stage=scenario_child reason=output_contract phase=scenario_child checkpoint=completion_marker category=output_contract actual=unexpected_output expected=success_marker',
+      'PHARMACY_REDIS_STAGE_FAILED stage=scenario_child reason=operation_failed',
     ),
   );
-  assert.ok(!f.output.join('\n').includes('not a completed proof'));
+});
+
+test('a valid result record passes even when the child emits unrelated logs', async (t) => {
+  const f = load(t, {
+    childOutput: 'SYNTHETIC_CHILD_LOG_SECRET',
+    childRecord: {
+      version: 1,
+      result: 'passed',
+      redis_major: 7,
+      lease_ms: 10000,
+    },
+  });
+  await f.api.main(['--isolated']);
+  assert.ok(
+    f.output.some((line) => line.startsWith('PHARMACY_REDIS_SUITE_PASSED')),
+  );
+  assert.ok(!f.output.join('\n').includes('SYNTHETIC_CHILD_LOG_SECRET'));
 });
 
 test('parent propagates only one strictly validated child diagnostic', async (t) => {
   const secret = 'private_owner_key_and_url';
   const f = load(t, {
-    childError: {
-      message: secret,
-      status: 17,
-      stderr:
-        `${secret}\n` +
-        'PHARMACY_REDIS_DIAGNOSTIC phase=lease checkpoint=competing_acquire category=assertion_failed actual=true expected=false\n' +
-        `stack ${secret}`,
+    childOutput: secret,
+    childStatus: 17,
+    childRecord: {
+      version: 1,
+      result: 'failed',
+      diagnostics: [
+        {
+          phase: 'lease',
+          checkpoint: 'competing_acquire',
+          category: 'assertion_failed',
+          actual: 'true',
+          expected: 'false',
+        },
+      ],
     },
   });
   await assert.rejects(f.api.main(['--isolated']), /verification/);
@@ -254,11 +281,10 @@ test('parent propagates only one strictly validated child diagnostic', async (t)
 test('parent rejects child diagnostics outside the fixed allowlist', async (t) => {
   const secret = 'untrusted-diagnostic-value';
   const f = load(t, {
-    childError: {
-      message: secret,
-      status: 17,
-      stderr: `PHARMACY_REDIS_DIAGNOSTIC phase=lease checkpoint=unknown category=assertion_failed actual=${secret} expected=false`,
-    },
+    childStatus: 17,
+    childRecordBytes: Buffer.from(
+      `{"version":1,"result":"failed","diagnostics":[{"phase":"lease","checkpoint":"unknown","category":"assertion_failed","actual":"${secret}","expected":"false"}]}\n`,
+    ),
   });
   await assert.rejects(f.api.main(['--isolated']), /verification/);
   assert.ok(
@@ -267,4 +293,75 @@ test('parent rejects child diagnostics outside the fixed allowlist', async (t) =
     ),
   );
   assert.ok(!f.output.join('\n').includes(secret));
+});
+
+test('parent prints the exact validated diagnostic snapshot once', () => {
+  let phaseReads = 0;
+  const diagnostic = {
+    checkpoint: 'competing_acquire',
+    category: 'assertion_failed',
+    actual: 'true',
+    expected: 'false',
+  };
+  Object.defineProperty(diagnostic, 'phase', {
+    enumerable: true,
+    get() {
+      phaseReads++;
+      return phaseReads === 1 ? 'lease' : 'SYNTHETIC_SECRET_SENTINEL';
+    },
+  });
+  const error = Object.assign(Error('PRIVATE_ERROR'), {
+    status: 17,
+    diagnostics: [diagnostic],
+  });
+  const output = [];
+  const previous = console.error;
+  try {
+    console.error = (line) => output.push(line);
+    reportStageFailure('scenario_child', error);
+  } finally {
+    console.error = previous;
+  }
+  assert.equal(phaseReads, 1);
+  assert.deepEqual(output, [
+    'PHARMACY_REDIS_STAGE_FAILED stage=scenario_child reason=child_exit_17 phase=lease checkpoint=competing_acquire category=assertion_failed actual=true expected=false',
+  ]);
+  assert.doesNotMatch(
+    output.join('\n'),
+    /SYNTHETIC_SECRET_SENTINEL|PRIVATE_ERROR/,
+  );
+});
+
+test('parent contains throwing child diagnostic accessors without leaking their errors', () => {
+  const diagnostic = {
+    checkpoint: 'competing_acquire',
+    category: 'assertion_failed',
+    actual: 'true',
+    expected: 'false',
+  };
+  Object.defineProperty(diagnostic, 'phase', {
+    enumerable: true,
+    get() {
+      throw Error('SYNTHETIC_GETTER_SECRET');
+    },
+  });
+  const error = Object.assign(Error('PRIVATE_ERROR'), {
+    status: 17,
+    diagnostics: [diagnostic],
+  });
+  const output = [];
+  const previous = console.error;
+  try {
+    console.error = (line) => output.push(line);
+    reportStageFailure('scenario_child', error);
+  } finally {
+    console.error = previous;
+  }
+  assert.deepEqual(output, [
+    'PHARMACY_REDIS_STAGE_FAILED stage=scenario_child reason=child_exit_17',
+  ]);
+  assert.doesNotMatch(
+    output.join('\n'),
+    /SYNTHETIC_GETTER_SECRET|PRIVATE_ERROR/,
+  );
 });
