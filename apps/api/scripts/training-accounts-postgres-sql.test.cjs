@@ -6,6 +6,10 @@ const { describe, it } = require('node:test');
 const {
   buildTrainingAccountAssertions,
 } = require('./training-accounts-postgres-sql.cjs');
+const {
+  parseTrainingAccountSqlReceipt,
+  trainingAccountSqlCheckpoint,
+} = require('./training-accounts-postgres-receipt.cjs');
 
 const MIGRATION_PATH = path.join(
   __dirname,
@@ -208,5 +212,54 @@ describe('training-account PostgreSQL assertion SQL builder', () => {
       ),
       true,
     );
+  });
+
+  it('emits each ordered receipt only after its top-level SQL assertion succeeds', () => {
+    const valid = inputs();
+    const result = buildTrainingAccountAssertions(valid);
+    const expected = [
+      ...result.assertions
+        .slice(0, 6)
+        .map((checkpoint) =>
+          trainingAccountSqlCheckpoint(valid.runId, checkpoint),
+        ),
+      ...result.expectedRejections.map(({ checkpoint }) =>
+        trainingAccountSqlCheckpoint(valid.runId, checkpoint),
+      ),
+      ...result.assertions
+        .slice(6)
+        .map((checkpoint) =>
+          trainingAccountSqlCheckpoint(valid.runId, checkpoint),
+        ),
+      trainingAccountSqlCheckpoint(valid.runId, 'proof_complete'),
+    ];
+    const records = result.sql.match(
+      /SELECT 'NINA_TRAINING_PG_V1\|[^']+' AS proof_record;/g,
+    );
+    assert.deepEqual(records, expected);
+    assert.deepEqual(
+      parseTrainingAccountSqlReceipt(
+        records
+          .map((record) =>
+            record.slice("SELECT '".length, -"' AS proof_record;".length),
+          )
+          .join('\n'),
+        valid.runId,
+        0,
+      ).assertions,
+      result.assertions,
+    );
+    assert.equal(records.length, 15);
+    assert.equal(
+      result.sql.indexOf(records[14]) > result.sql.indexOf('ROLLBACK;'),
+      true,
+    );
+    assert.equal(
+      result.sql.indexOf(records[14]) >
+        result.sql.indexOf('$training_account_post_rollback_empty$;'),
+      true,
+    );
+    assert.equal(records.join('').includes(valid.passwordHash), false);
+    assert.equal(records.join('').includes(valid.runId), true);
   });
 });

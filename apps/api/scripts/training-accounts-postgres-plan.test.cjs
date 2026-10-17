@@ -146,6 +146,11 @@ it('plans readiness and SQL execution without exposing credential values', async
       argument.includes('/run/nina-proof/proof.sql'),
     ),
   );
+  const psql = assertions.find((argument) => argument.includes('exec psql'));
+  assert.match(psql, /psql --quiet --tuples-only --no-align --no-password/);
+  assert.match(psql, /--no-psqlrc --set ON_ERROR_STOP=1/);
+  assert.equal(psql.includes('--echo-all'), false);
+  assert.equal(psql.includes('--echo-queries'), false);
   assert.equal(rendered.includes('POSTGRES_PASSWORD='), false);
   assert.equal(Object.isFrozen(assertions), true);
 });

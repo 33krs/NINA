@@ -1,3 +1,7 @@
+const {
+  trainingAccountSqlCheckpoint,
+} = require('./training-accounts-postgres-receipt.cjs');
+
 const MAX_SQL_BYTES = 16 * 1024;
 const MAX_HASH_LENGTH = 256;
 const PASSWORD_HASH_PATTERN =
@@ -83,6 +87,7 @@ function buildTrainingAccountAssertions(input) {
   const maximumUsername = `u_${compactRunId.slice(0, 12)}${'x'.repeat(18)}`;
   const ordinaryUsername = `nina_${compactRunId.slice(0, 12)}`;
   const updatedAt = "TIMESTAMP '2000-01-01 00:00:00'";
+  const checkpoint = (name) => trainingAccountSqlCheckpoint(runId, name);
   const insert = (id, username, role) =>
     `INSERT INTO "User" ("id", "username", "passwordHash", "role", "updatedAt")\n` +
     `VALUES (${id}, '${username}', '${passwordHash}', '${role}', ${updatedAt});`;
@@ -118,20 +123,23 @@ function buildTrainingAccountAssertions(input) {
       default:
         invalidInput();
     }
-    return expectedRejection(expectation, statement);
+    return `${expectedRejection(expectation, statement)}\n${checkpoint(expectation.checkpoint)}`;
   });
 
   const sql = `BEGIN;
-DO $training_account_assertions$
-DECLARE
-  role_labels text[];
-  username_collation text;
-  role_default text;
+DO $training_account_table_empty_before$
 BEGIN
   IF EXISTS (SELECT 1 FROM "User") THEN
     RAISE EXCEPTION 'Training account table must start empty' USING ERRCODE = 'P0001';
   END IF;
+END
+$training_account_table_empty_before$;
+${checkpoint('table_empty_before')}
 
+DO $training_account_role_enum_values$
+DECLARE
+  role_labels text[];
+BEGIN
   SELECT array_agg(pg_enum_row.enumlabel::text ORDER BY pg_enum_row.enumsortorder)
     INTO role_labels
     FROM pg_type AS pg_type_row
@@ -141,7 +149,14 @@ BEGIN
   IF role_labels IS DISTINCT FROM ARRAY['ADMIN', 'INSTRUCTOR', 'STUDENT']::text[] THEN
     RAISE EXCEPTION 'Training-account roles do not match' USING ERRCODE = 'P0001';
   END IF;
+END
+$training_account_role_enum_values$;
+${checkpoint('role_enum_values')}
 
+DO $training_account_role_has_no_default$
+DECLARE
+  role_default text;
+BEGIN
   SELECT column_info.column_default INTO role_default
     FROM information_schema.columns AS column_info
    WHERE column_info.table_schema = current_schema()
@@ -149,7 +164,14 @@ BEGIN
   IF role_default IS NOT NULL THEN
     RAISE EXCEPTION 'Training-account role must not have a default' USING ERRCODE = 'P0001';
   END IF;
+END
+$training_account_role_has_no_default$;
+${checkpoint('role_has_no_default')}
 
+DO $training_account_username_c_collation$
+DECLARE
+  username_collation text;
+BEGIN
   SELECT pg_collation_row.collname INTO username_collation
     FROM pg_attribute AS pg_attribute_row
     JOIN pg_class AS pg_class_row ON pg_class_row.oid = pg_attribute_row.attrelid
@@ -162,23 +184,34 @@ BEGIN
     RAISE EXCEPTION 'Username collation must be C' USING ERRCODE = 'P0001';
   END IF;
 END
-$training_account_assertions$;
+$training_account_username_c_collation$;
+${checkpoint('username_c_collation')}
 
 ${insert(`'${runId}'::uuid`, minimumUsername, 'STUDENT')}
 ${insert(idFor('administrator'), maximumUsername, 'ADMIN')}
 ${insert(idFor('instructor'), ordinaryUsername, 'INSTRUCTOR')}
 
-DO $training_account_valid_rows$
+DO $training_account_valid_username_boundaries$
 BEGIN
-  IF (SELECT count(*) FROM "User") <> 3
-     OR NOT EXISTS (SELECT 1 FROM "User" WHERE "username" = '${minimumUsername}')
+  IF NOT EXISTS (SELECT 1 FROM "User" WHERE "username" = '${minimumUsername}')
      OR NOT EXISTS (SELECT 1 FROM "User" WHERE char_length("username") = 32)
-     OR EXISTS (SELECT 1 FROM "User" WHERE NOT "isActive" OR "authVersion" <> 0 OR "createdAt" IS NULL)
-     OR EXISTS (SELECT 1 FROM "User" WHERE "updatedAt" <> ${updatedAt}) THEN
-    RAISE EXCEPTION 'Valid training-account defaults or username boundaries failed' USING ERRCODE = 'P0001';
+  THEN
+    RAISE EXCEPTION 'Valid training-account username boundaries failed' USING ERRCODE = 'P0001';
   END IF;
 END
-$training_account_valid_rows$;
+$training_account_valid_username_boundaries$;
+${checkpoint('valid_username_boundaries')}
+
+DO $training_account_explicit_roles_and_defaults$
+BEGIN
+  IF (SELECT count(*) FROM "User") <> 3
+     OR EXISTS (SELECT 1 FROM "User" WHERE NOT "isActive" OR "authVersion" <> 0 OR "createdAt" IS NULL)
+     OR EXISTS (SELECT 1 FROM "User" WHERE "updatedAt" <> ${updatedAt}) THEN
+    RAISE EXCEPTION 'Valid training-account defaults failed' USING ERRCODE = 'P0001';
+  END IF;
+END
+$training_account_explicit_roles_and_defaults$;
+${checkpoint('explicit_roles_and_defaults')}
 
 ${rejectionSql.join('\n\n')}
 
@@ -195,6 +228,7 @@ BEGIN
   END IF;
 END
 $training_account_final_empty$;
+${checkpoint('table_empty_after')}
 ROLLBACK;
 DO $training_account_post_rollback_empty$
 BEGIN
@@ -203,6 +237,8 @@ BEGIN
   END IF;
 END
 $training_account_post_rollback_empty$;
+${checkpoint('table_empty_after_rollback')}
+${checkpoint('proof_complete')}
 `;
   if (Buffer.byteLength(sql, 'utf8') > MAX_SQL_BYTES) invalidInput();
 

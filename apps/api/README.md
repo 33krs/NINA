@@ -118,6 +118,19 @@ and the root-to-`postgres` initialization behavior comes from the
 [official PostgreSQL image entrypoint](https://github.com/docker-library/postgres/blob/master/docker-entrypoint.sh).
 Synthetic tests inspect the plan without invoking Docker.
 
+## Training-account PostgreSQL SQL receipts (import-only)
+
+The assertion SQL emits one versioned, run-ID-bound text row only after each
+successful top-level check or expected SQLSTATE rejection. Its final success
+record follows both `ROLLBACK` and the post-rollback empty-table assertion.
+`parseTrainingAccountSqlReceipt()` accepts only the exact 15-record order, fixed
+checkpoint names/states, a zero numeric child exit status, and at most 8 KiB of
+stdout. It returns frozen counts and fixed metadata without forwarding raw
+output. The planned `psql` command uses quiet, tuples-only, unaligned output and
+disables password prompting; it retains `ON_ERROR_STOP` and does not enable query
+echoing. These import-only components structurally test the receipt protocol;
+they do not establish PostgreSQL syntax, child-close, cleanup, or runtime proof.
+
 Run the ordinary API checks with `npm --workspace @nina/api test` and
 `npm --workspace @nina/api run lint`.
 
@@ -407,9 +420,3 @@ This proves migration constraints, not cross-medication/prescription matching,
 expiry eligibility, service transactions, concurrency or administrator resistance.
 The existing deterministic helper tests and offline Prisma checks remain useful;
 run the isolated command before claiming live database proof.
-
-## Training-account PostgreSQL receipt helpers (import-only)
-
-The receipt helper can emit fixed run-bound SQL checkpoint expressions and parse
-bounded synthetic stdout into frozen metadata. It does not execute SQL or establish
-PostgreSQL/runtime proof; assertion placement and command integration are separate.
