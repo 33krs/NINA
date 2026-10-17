@@ -10,6 +10,157 @@ const {
   validateIsolatedClient,
 } = require('./verify-odontogram-postgres.cjs');
 
+function assertUnchanged(before, after) {
+  assert.deepEqual(
+    after,
+    before,
+    'Stock, history and prescription state must not change',
+  );
+}
+
+async function databaseSnapshot(db) {
+  // Full business rows, ordered by stable IDs; no volatile query-time fields.
+  const rows = await db.$queryRaw`SELECT jsonb_build_object(
+    'patients', (SELECT jsonb_agg(t ORDER BY "id") FROM "Patient" t),
+    'medications', (SELECT jsonb_agg(t ORDER BY "id") FROM "Medication" t),
+    'batches', (SELECT jsonb_agg(t ORDER BY "id") FROM "Batch" t),
+    'prescriptions', (SELECT jsonb_agg(t ORDER BY "id") FROM "Prescription" t),
+    'items', (SELECT jsonb_agg(t ORDER BY "id") FROM "PrescriptionItem" t),
+    'events', (SELECT jsonb_agg(t ORDER BY "id") FROM "PrescriptionDispensing" t),
+    'allocations', (SELECT jsonb_agg(t ORDER BY "id") FROM "PrescriptionDispensingAllocation" t)
+  ) AS snapshot`;
+  return rows[0].snapshot;
+}
+
+async function verifyReplayAndRollback(db, service, completed) {
+  const replaySnapshot = await databaseSnapshot(db);
+  assert.deepEqual(
+    await service.dispenseItem(completed.request),
+    completed.result,
+  );
+  assertUnchanged(replaySnapshot, await databaseSnapshot(db));
+  for (const [change, message] of [
+    [{ quantity: 1 }, /Overdelivery exceeds the prescribed quantity/],
+    [{ quantity: 3 }, /Event ID does not match requested delivery/],
+    [{ itemId: 'first' }, /Event ID does not match requested delivery/],
+    [
+      { prescriptionId: 'expired', itemId: 'expired' },
+      /Event ID belongs to another prescription/,
+    ],
+  ]) {
+    await assert.rejects(
+      service.dispenseItem({ ...completed.request, ...change }),
+      message,
+    );
+    assertUnchanged(replaySnapshot, await databaseSnapshot(db));
+  }
+
+  await db.medication.create({
+    data: {
+      id: 'rollback',
+      code: 'rollback',
+      name: 'Synthetic',
+      activePrinciple: 'Synthetic',
+      batches: {
+        create: {
+          id: 'rollback',
+          lotNumber: 'Synthetic',
+          expirationDate: new Date('9999-12-31T00:00:00Z'),
+          stock: 4,
+        },
+      },
+    },
+  });
+  await db.prescription.create({
+    data: {
+      id: 'rollback',
+      patientId: 'patient',
+      status: 'ISSUED',
+      items: {
+        create: { id: 'rollback-item', medicationId: 'rollback', quantity: 2 },
+      },
+    },
+  });
+  const request = {
+    prescriptionId: 'rollback',
+    itemId: 'rollback-item',
+    quantity: 2,
+    eventId: crypto.randomUUID(),
+  };
+  const beforeFailure = await databaseSnapshot(db);
+  try {
+    // DDL injects a failure only; the actual service owns every dispensing write.
+    await db.$executeRawUnsafe(`CREATE FUNCTION pharmacy_proof_allocation_failure()
+      RETURNS trigger LANGUAGE plpgsql AS $proof$
+      BEGIN
+        IF NEW."prescriptionItemId" = 'rollback-item' THEN
+          IF NEW."batchId" <> 'rollback' OR NEW."quantity" <> 2 OR
+            (SELECT "stock" FROM "Batch" WHERE "id" = 'rollback') IS DISTINCT FROM 2 THEN
+            RAISE EXCEPTION 'PHARMACY_PROOF_WRONG_STOCK_STATE';
+          END IF;
+          RAISE EXCEPTION USING ERRCODE = 'P0001',
+            MESSAGE = 'PHARMACY_PROOF_ROLLBACK_STOCK_VISIBLE';
+        END IF;
+        RETURN NEW;
+      END $proof$`);
+    await db.$executeRawUnsafe(`CREATE TRIGGER pharmacy_proof_allocation_failure
+      BEFORE INSERT ON "PrescriptionDispensingAllocation"
+      FOR EACH ROW EXECUTE FUNCTION pharmacy_proof_allocation_failure()`);
+    await assert.rejects(service.dispenseItem(request), (error) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /\bPHARMACY_PROOF_ROLLBACK_STOCK_VISIBLE\b/);
+      assert.doesNotMatch(error.message, /PHARMACY_PROOF_WRONG_STOCK_STATE/);
+      return true;
+    });
+    assertUnchanged(beforeFailure, await databaseSnapshot(db));
+    assert.equal(
+      await db.prescriptionDispensing.findUnique({
+        where: { id: request.eventId },
+      }),
+      null,
+    );
+  } finally {
+    try {
+      await db.$executeRawUnsafe(
+        'DROP TRIGGER IF EXISTS pharmacy_proof_allocation_failure ON "PrescriptionDispensingAllocation"',
+      );
+    } finally {
+      await db.$executeRawUnsafe(
+        'DROP FUNCTION IF EXISTS pharmacy_proof_allocation_failure()',
+      );
+    }
+  }
+  const objects = await db.$queryRaw`SELECT
+    NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'pharmacy_proof_allocation_failure')
+    AND NOT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'pharmacy_proof_allocation_failure') AS removed`;
+  assert.equal(objects[0].removed, true);
+  const result = await service.dispenseItem(request);
+  assert.deepEqual(result, {
+    eventId: request.eventId,
+    allocations: [{ batchId: 'rollback', quantity: 2 }],
+  });
+  assert.equal(
+    (await db.batch.findUniqueOrThrow({ where: { id: 'rollback' } })).stock,
+    2,
+  );
+  assert.equal(
+    (await db.prescription.findUniqueOrThrow({ where: { id: 'rollback' } }))
+      .status,
+    'DISPENSED',
+  );
+  const saved = await db.prescriptionDispensing.findUniqueOrThrow({
+    where: { id: request.eventId },
+    include: { allocations: true },
+  });
+  assert.equal(saved.prescriptionId, request.prescriptionId);
+  assert.equal(saved.allocations.length, 1);
+  assert.equal(saved.allocations[0].prescriptionItemId, request.itemId);
+  assert.equal(saved.allocations[0].batchId, 'rollback');
+  assert.equal(saved.allocations[0].quantity, 2);
+  assert.equal(await db.prescriptionDispensing.count(), 4);
+  assert.equal(await db.prescriptionDispensingAllocation.count(), 4);
+}
+
 async function ownedConfig(env, inspect) {
   assert.ok(
     env.NINA_PHARMACY_DISPENSING_PG15 === '1',
@@ -254,17 +405,20 @@ async function main(
       },
     });
     const service = new PharmacyDispensingService(writer);
+    let completed;
     for (const [itemId, quantity, stock, status, count, delivered] of [
       ['first', 2, 6, 'ISSUED', 1, 2],
       ['first', 1, 5, 'ISSUED', 2, 3],
       ['second', 2, 3, 'DISPENSED', 3, 5],
     ]) {
-      const result = await service.dispenseItem({
+      const request = {
         prescriptionId: 'partial',
         itemId,
         quantity,
         eventId: crypto.randomUUID(),
-      });
+      };
+      const result = await service.dispenseItem(request);
+      completed = { request, result };
       assert.deepEqual(result.allocations, [
         { batchId: 'available', quantity },
       ]);
@@ -314,6 +468,7 @@ async function main(
     );
     assert.equal(await db.prescriptionDispensing.count(), 3);
     assert.equal(await db.prescriptionDispensingAllocation.count(), 3);
+    await verifyReplayAndRollback(db, service, completed);
   } finally {
     const disconnected = await Promise.allSettled(
       clients.map((client) => client.$disconnect()),
@@ -324,6 +479,7 @@ async function main(
     );
   }
   console.log(
+    // Keep the shared runner's baseline summary stable; extra proofs must pass first.
     'PHARMACY_SERVICE_BASELINE_PASSED deliveries=3 expiry_rejections=1',
   );
 }
@@ -333,4 +489,4 @@ if (require.main === module)
     console.error('PHARMACY_SERVICE_FAILED');
     process.exitCode = 1;
   });
-module.exports = { main, ownedConfig, bindRuntime };
+module.exports = { main, ownedConfig, bindRuntime, assertUnchanged };
