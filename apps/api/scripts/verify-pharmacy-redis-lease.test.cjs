@@ -34,6 +34,7 @@ function scenario(fault) {
     now: 0,
     clients: [],
   };
+  const diagnostics = [];
   const adapter = {
     createClientDouble() {
       const client = {
@@ -107,6 +108,7 @@ function scenario(fault) {
         first: services[0],
         second: services[1],
         key,
+        onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
       });
     } finally {
       clients.forEach((client) => {
@@ -114,7 +116,7 @@ function scenario(fault) {
       });
     }
   };
-  return { state, main };
+  return { state, main, diagnostics };
 }
 
 test('lease assertions observe production expiry and owner-safe successor release', async () => {
@@ -145,5 +147,57 @@ for (const [fault, message] of [
       state.clients.every(
         (client) => !client.isOpen && (client.destroyed || !client.everOpened),
       ),
+    );
+  });
+
+for (const [fault, diagnostic] of [
+  [
+    'version',
+    {
+      checkpoint: 'redis_version',
+      category: 'assertion_failed',
+      actual: 'other_version',
+      expected: 'redis7',
+    },
+  ],
+  [
+    'short',
+    {
+      checkpoint: 'first_lease_ttl',
+      category: 'assertion_failed',
+      actual: 'ttl_below_min',
+      expected: 'ttl_in_range',
+    },
+  ],
+  [
+    'busy',
+    {
+      checkpoint: 'competing_acquire',
+      category: 'assertion_failed',
+      actual: 'true',
+      expected: 'false',
+    },
+  ],
+  [
+    'connect',
+    {
+      checkpoint: 'client_connect',
+      category: 'operation_failed',
+      actual: 'unavailable',
+      expected: 'success',
+    },
+  ],
+])
+  test(`reports bounded safe lease diagnostic for ${fault}`, async () => {
+    const { state, main, diagnostics } = scenario(fault);
+    await assert.rejects(main());
+    assert.equal(diagnostics.length, 1);
+    assert.equal(
+      JSON.stringify(diagnostics[0]),
+      JSON.stringify({ phase: 'lease', ...diagnostic }),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(diagnostics),
+      /synthetic-owned-fixture|fixture connect|pharmacy:prescription/,
     );
   });
