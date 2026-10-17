@@ -35,6 +35,17 @@ applied to any database. No account rows, default credentials, or administrator
 are seeded. `authVersion` is only groundwork for future revocation; no session
 or authentication behavior is implemented here.
 
+## Training-account PostgreSQL assertion SQL (import-only)
+
+`scripts/training-accounts-postgres-sql.cjs` builds a bounded transaction that
+asserts the training-account migration's constraints using a caller-provided
+format-validated scrypt hash and UUID. It performs no database, filesystem, process,
+or environment access. The generated SQL contains the hash for fixture inserts:
+callers must not log the SQL or any input values. Its fixed checkpoint metadata
+contains only stage names and expected SQLSTATEs. The synthetic tests inspect
+the builder and existing migration text; they do not prove PostgreSQL runtime
+behavior or connect to a database.
+
 ## Training-account PostgreSQL recovery foundation (import-only)
 
 `scripts/verify-training-accounts-postgres.cjs` contains import-only recovery
