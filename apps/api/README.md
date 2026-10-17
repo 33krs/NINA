@@ -140,8 +140,8 @@ obtained internally through the pinned socket. Existing guards run before the
 canonical compiled adapter is loaded or any client is created; only then does the
 child delegate to the lease assertions with its owned instances. Finally destroys
 all opened clients, including partial startup failures; CLI errors are generic.
-Disposable orchestration, actual Redis execution and exact resource cleanup proof
-remain pending. VM startup tests are safety evidence, not live Redis proof.
+The disposable runner invokes this child. VM startup tests are safety evidence,
+not live Redis proof.
 
 `pharmacy-redis-resource-identity.cjs` is an import-only context/observation
 contract. It checks canonical private-root/run/image inputs, exact Redis resource
@@ -159,19 +159,28 @@ an empty owned network. Created/stopped fixtures are valid cleanup targets;
 foreign members, ambiguous errors and unproved absence fail closed. Cleanup has
 its own bounded deadline, independent of an aborted creation signal. Unit executor
 doubles establish these state transitions, not disposable Docker cleanup proof.
-No standalone entrypoint or disposable runner is wired yet.
 
-### Disposable Redis fixture foundation
+### Disposable Redis verification
 
-The import-only `pharmacy-redis-runner-fixture.cjs` prepares fresh private
-mode-0700 storage, mode-0600 authentication/proof files and UUID-bound creation
-arguments for the pinned cached image. Credentials stay out of argv and the
-controlled environment; disposal removes only its two known files.
+The import-only `pharmacy-redis-runner-fixture.cjs` prepares private authentication,
+proof files and fixed creation arguments. It does not execute Docker, load clients
+or grant connection authority; the orchestrator owns those guarded operations.
 
-This component does not execute Docker, load Redis clients or grant connection
-authority. Its direct tests use a shared VM fixture without live services.
-The orchestrator and package command remain unwired; actual disposable Redis,
-lease-expiry and cleanup proof require the next authorized integration slice.
+`npm run test:pharmacy:redis --workspace=@nina/api` builds the actual adapter and
+runs `verify-pharmacy-redis.cjs --isolated`. Run it only with authorization for
+fresh local disposable Redis resources and their own loopback connections.
+The runner requires the pinned cached `redis:7-alpine` image; it never pulls.
+Private0700 storage contains only two0600 files with fresh authentication/proof.
+The owned UID/GID, readonly config/root, ephemeral data, dropped capabilities,
+explicit loopback port and dedicated labelled network must pass existing guards
+before readiness clients or the guarded scenario child can connect.
+
+SIGINT/SIGTERM and deadlines settle bounded subprocesses before independent
+ownership-checked cleanup. Overall PASS requires exact resource absence;
+uncertain cleanup retains private recovery files and fails. No existing services,
+ambient credentials, PostgreSQL, application configuration or endpoints are used.
+The orchestrator's VM tests are not live proof: actual Redis7/ten-second expiry
+and disposable cleanup still require a separately authorized real run.
 
 ### Calendar-date batch expiry
 
