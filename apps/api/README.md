@@ -67,9 +67,28 @@ to the event's prescription and that the item and batch reference the same
 medication. These cross-record rules, concurrent per-item delivery limits,
 stock decreases and prescription status transitions are not enforced by these
 foreign keys or the pure balance helper. Redis locks and Prisma transactions
-remain future work. Partial delivery and blocking expired lots were selected;
-the exact expiration cutoff is a later eligibility decision. This unit adds no
+remain future work. Partial delivery and blocking expired lots were selected.
+The ledger itself adds no
 endpoint, operator identity, expiry filter, stock mutation, or RabbitMQ flow.
+
+### Calendar-date batch expiry
+
+`isBatchExpired(expirationLabel, evaluationInstant)` is a pure policy helper.
+Supply a real, canonical `YYYY-MM-DD` Gregorian label and a finite `Date` instant.
+Four-digit proleptic Gregorian years include `0000`; malformed labels and
+impossible dates are rejected rather than normalized.
+
+A batch remains valid throughout its indicated date in `America/Santiago` and
+expires only when the evaluation instant's local calendar date is later. The
+helper uses explicit Gregorian/Latin-numbered ICU timezone data, not server
+timezone, a fixed UTC offset, or a 24-hour duration. Clock changes may repeat
+hours or skip midnight without changing this calendar-date rule.
+
+The helper does not interpret legacy `Batch.expirationDate` timestamps, filter
+medications or stock, or persist dispensing. A future persistence adapter must
+preserve the indicated calendar label explicitly; converting a UTC-midnight
+label into Santiago time can incorrectly turn it into the previous date.
+Service integration and transactional eligibility checks remain pending.
 
 ### Isolated PostgreSQL 15 ledger proof
 
