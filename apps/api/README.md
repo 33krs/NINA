@@ -140,6 +140,13 @@ flags but not its transient finalizing flag; callers must serialize validation
 against finalization rather than treating this validator as a finalization
 lock. Synthetic tests do not prove a live daemon's inspection behavior.
 
+`validateTrainingPostgresMounts(context, containerJson)` is the import-only
+mount-specific check. It obtains the SQL source path from the private artifact
+identity validator rather than accepting a caller path, then checks the exact
+three tmpfs options and sole read-only SQL bind in planned and actual mount
+inspection records. Its frozen response only confirms the mount contract; it
+does not confirm the container identity or grant cleanup authority.
+
 ## Training-account PostgreSQL SQL receipts (import-only)
 
 The assertion SQL emits one versioned, run-ID-bound text row only after each
