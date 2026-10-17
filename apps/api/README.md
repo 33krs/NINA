@@ -59,6 +59,8 @@ requires successful proof and confirmed cleanup. Cleanup executor calls receive
 a fixed five-second bound and no proof-abort signal. Its tests use synthetic
 executors only; they do not connect to PostgreSQL or invoke Docker.
 
+The recovery manifest uses a strict version-two schema; supported version-one manifests reopen as an empty artifact inventory. Existing private-file roots and manifest identities are rechecked before updates and cleanup.
+
 Run the ordinary API checks with `npm --workspace @nina/api test` and
 `npm --workspace @nina/api run lint`.
 
