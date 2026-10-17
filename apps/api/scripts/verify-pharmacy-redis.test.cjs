@@ -222,4 +222,49 @@ test('child must return its exact scenario completion marker', async (t) => {
   const f = load(t, { childOutput: 'not a completed proof' });
   await assert.rejects(f.api.main(['--isolated']), /verification/);
   assert.equal(f.events.at(-1), 'cleanup');
+  assert.ok(
+    f.output.includes(
+      'PHARMACY_REDIS_STAGE_FAILED stage=scenario_child reason=output_contract phase=scenario_child checkpoint=completion_marker category=output_contract actual=unexpected_output expected=success_marker',
+    ),
+  );
+  assert.ok(!f.output.join('\n').includes('not a completed proof'));
+});
+
+test('parent propagates only one strictly validated child diagnostic', async (t) => {
+  const secret = 'private_owner_key_and_url';
+  const f = load(t, {
+    childError: {
+      message: secret,
+      status: 17,
+      stderr:
+        `${secret}\n` +
+        'PHARMACY_REDIS_DIAGNOSTIC phase=lease checkpoint=competing_acquire category=assertion_failed actual=true expected=false\n' +
+        `stack ${secret}`,
+    },
+  });
+  await assert.rejects(f.api.main(['--isolated']), /verification/);
+  assert.ok(
+    f.output.includes(
+      'PHARMACY_REDIS_STAGE_FAILED stage=scenario_child reason=child_exit_17 phase=lease checkpoint=competing_acquire category=assertion_failed actual=true expected=false',
+    ),
+  );
+  assert.ok(!f.output.join('\n').includes(secret));
+});
+
+test('parent rejects child diagnostics outside the fixed allowlist', async (t) => {
+  const secret = 'untrusted-diagnostic-value';
+  const f = load(t, {
+    childError: {
+      message: secret,
+      status: 17,
+      stderr: `PHARMACY_REDIS_DIAGNOSTIC phase=lease checkpoint=unknown category=assertion_failed actual=${secret} expected=false`,
+    },
+  });
+  await assert.rejects(f.api.main(['--isolated']), /verification/);
+  assert.ok(
+    f.output.includes(
+      'PHARMACY_REDIS_STAGE_FAILED stage=scenario_child reason=child_exit_17',
+    ),
+  );
+  assert.ok(!f.output.join('\n').includes(secret));
 });

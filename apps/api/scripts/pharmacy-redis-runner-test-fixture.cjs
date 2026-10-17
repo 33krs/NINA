@@ -50,6 +50,12 @@ function load(t, options, fixtureOnly) {
       if (options.cancel === stage)
         processDouble.emit(options.signal ?? 'SIGINT');
       if (options.fail === stage) throw Error('synthetic private failure');
+      if (stage === 'child' && options.childError) {
+        const error = Error(options.childError.message);
+        error.status = options.childError.status;
+        error.stderr = options.childError.stderr;
+        throw error;
+      }
       if (stage === 'image') return options.image ?? imageId;
       if (stage === 'network' && tokens[1] === 'create') return networkId;
       if (stage === 'create') return options.createOutput ?? containerId;
