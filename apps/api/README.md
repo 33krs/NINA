@@ -118,6 +118,17 @@ and the root-to-`postgres` initialization behavior comes from the
 [official PostgreSQL image entrypoint](https://github.com/docker-library/postgres/blob/master/docker-entrypoint.sh).
 Synthetic tests inspect the plan without invoking Docker.
 
+`scripts/training-accounts-postgres-runtime.cjs` exports an import-only
+`runTrainingAccountPostgresProof({ signal } = {})` entry point. It owns fixture
+preparation, fixed `/usr/bin/docker` execution through the local daemon socket,
+image and owned-resource observations, bounded readiness, authenticated TCP
+server-version validation, exact SQL receipt parsing, and independent owned
+resource cleanup. Child processes receive a small fixed environment; failed
+stdout is never treated as proof, and recovery evidence is retained whenever
+proof or cleanup is incomplete. Its VM tests use synthetic dependencies only:
+they do not demonstrate Docker availability, a running PostgreSQL server, or
+live database proof.
+
 ## Training-account PostgreSQL image observations (import-only)
 
 `training-accounts-postgres-observations.cjs` validates bounded JSON returned
