@@ -490,6 +490,72 @@ function readRecoveryState(context) {
   return Object.freeze(JSON.parse(JSON.stringify(state.manifest)));
 }
 
+function validatePreparedArtifacts(context) {
+  const state = getState(context);
+  try {
+    if (
+      state.finalizing ||
+      state.pending.size !== 0 ||
+      state.manifest.proofSucceeded ||
+      state.manifest.cleanupConfirmed
+    )
+      fail('Prepared PostgreSQL artifacts are unavailable');
+    verifyPrivateRoot(state.root);
+    const records = state.manifest.artifacts;
+    const paths = {};
+    for (const [kind, filename] of [
+      ['proof_sql', 'proof.sql'],
+      ['postgres_env', 'postgres.env'],
+    ]) {
+      const record = records[kind];
+      const artifactPath = path.join(state.root, filename);
+      const stat = fs.lstatSync(artifactPath);
+      if (
+        !record ||
+        record.state !== 'complete' ||
+        stat.isSymbolicLink() ||
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        (stat.mode & 0o777) !== 0o600 ||
+        (currentUid() !== undefined && stat.uid !== currentUid()) ||
+        stat.dev !== record.dev ||
+        stat.ino !== record.ino ||
+        stat.size !== record.size ||
+        stat.size <= 0 ||
+        stat.size > ARTIFACTS[kind].maxBytes
+      )
+        fail('Prepared PostgreSQL artifacts are unavailable');
+      const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+      const descriptor = fs.openSync(
+        artifactPath,
+        fs.constants.O_RDONLY | noFollow,
+      );
+      try {
+        const opened = fs.fstatSync(descriptor);
+        if (
+          !opened.isFile() ||
+          opened.nlink !== 1 ||
+          (opened.mode & 0o777) !== 0o600 ||
+          (currentUid() !== undefined && opened.uid !== currentUid()) ||
+          opened.dev !== record.dev ||
+          opened.ino !== record.ino ||
+          opened.size !== record.size
+        )
+          fail('Prepared PostgreSQL artifacts are unavailable');
+      } finally {
+        fs.closeSync(descriptor);
+      }
+      paths[kind] = artifactPath;
+    }
+    return Object.freeze({
+      proofSql: paths.proof_sql,
+      postgresEnv: paths.postgres_env,
+    });
+  } catch {
+    fail('Prepared PostgreSQL artifacts are unavailable');
+  }
+}
+
 function writePrivateArtifact(context, kind, content) {
   const state = getState(context);
   verifyPrivateRoot(state.root);
@@ -1042,5 +1108,6 @@ module.exports = {
   readRecoveryState,
   reconcileOwnedResources,
   reportFailure,
+  validatePreparedArtifacts,
   writePrivateArtifact,
 };

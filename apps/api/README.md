@@ -70,6 +70,12 @@ an empty artifact inventory and never adopt files by name. No cross-process
 concurrency guarantee is made; this lifecycle does not read environment values
 or create credentials, and its tests use synthetic content only.
 
+`validatePreparedArtifacts(context)` is a read-only check for active prepared
+fixtures. It revalidates the canonical private root and both complete registered
+files, including mode, owner, link count, device, inode, and size, then returns
+only the two fixed artifact paths. It refuses pending, finalizing, or already
+completed recovery contexts and does not provide deletion authority.
+
 ## Training-account PostgreSQL fixture preparation (import-only)
 
 Run `npm run build --workspace=@nina/api` before importing
