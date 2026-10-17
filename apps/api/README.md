@@ -158,8 +158,15 @@ prescriptions cannot overdraw shared stock. Exact outcomes, recorded allocations
 stock, statuses and loser history are asserted. Observation has a three-second
 deadline and monitor statements are bounded; fixture clients alone use a
 15-second transaction timeout. Finally releases gates, settles launched work and
-disconnects all clients. Concurrent exact replay/global-ID collision remain
-pending; observer unit tests alone do not prove database concurrency.
+disconnects all clients. Concurrent identical requests also queue at the held
+prescription row, then return identical recorded results with only one stock
+decrement/event/allocation and terminal status. Different prescriptions sharing
+one event UUID queue at the held batch after both absent replay lookups; stock is
+sufficient for both requests. Exactly one native Prisma `P2002` rejection must
+identify model `PrescriptionDispensing` and target `["id"]`. Only the winner's
+delivery persists; the loser's stock decrement rolls back and its prescription,
+items and history remain unchanged. Assertion/observer unit tests alone do not
+prove database concurrency.
 The suite does not expose an endpoint or use Redis.
 Both existing modes remain available unchanged; never invoke the child directly
 with an ambient datasource or bypass its runner-issued ownership checks.

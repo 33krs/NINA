@@ -1,6 +1,80 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { observedWaiters } = require('./verify-pharmacy-contention.cjs');
+const {
+  assertPrescriptionCollision,
+} = require('./verify-pharmacy-contention.cjs');
+
+test('collision assertion rejects a generic service rejection', () => {
+  assert.throws(() =>
+    assertPrescriptionCollision(new Error('Insufficient stock')),
+  );
+});
+
+test('collision assertion rejects uniqueness from a different model', () => {
+  assert.throws(() =>
+    assertPrescriptionCollision(
+      Object.assign(new Error('Synthetic'), {
+        code: 'P2002',
+        meta: { modelName: 'Batch', target: ['stock'] },
+      }),
+    ),
+  );
+});
+
+function collisionError(change = {}) {
+  const { Prisma } = require('@prisma/client');
+  return new Prisma.PrismaClientKnownRequestError('Synthetic', {
+    clientVersion: 'test',
+    code: 'P2002',
+    meta: { modelName: 'PrescriptionDispensing', target: ['id'] },
+    ...change,
+  });
+}
+
+test('accepts the exact observed native event-ID constraint metadata', () => {
+  assert.doesNotThrow(() => assertPrescriptionCollision(collisionError()));
+});
+
+test('rejects a plain Error impersonating otherwise correct constraint metadata', () => {
+  assert.throws(() =>
+    assertPrescriptionCollision(
+      Object.assign(new Error('Synthetic'), {
+        code: 'P2002',
+        meta: { modelName: 'PrescriptionDispensing', target: ['id'] },
+      }),
+    ),
+  );
+});
+
+for (const [name, change] of [
+  ['transaction failure code', { code: 'P2034' }],
+  ['missing metadata', { meta: undefined }],
+  ['wrong model', { meta: { modelName: 'Batch', target: ['id'] } }],
+  [
+    'wrong target',
+    {
+      meta: { modelName: 'PrescriptionDispensing', target: ['prescriptionId'] },
+    },
+  ],
+  [
+    'extra target',
+    {
+      meta: {
+        modelName: 'PrescriptionDispensing',
+        target: ['id', 'prescriptionId'],
+      },
+    },
+  ],
+  [
+    'string target instead of the observed array',
+    { meta: { modelName: 'PrescriptionDispensing', target: 'id' } },
+  ],
+]) {
+  test(`collision assertion rejects ${name}`, () => {
+    assert.throws(() => assertPrescriptionCollision(collisionError(change)));
+  });
+}
 
 const identities = [1, 2, 3].map((pid) => ({ pid, started: `start-${pid}` }));
 function rows() {
