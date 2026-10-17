@@ -128,6 +128,8 @@ for (const [signal, phase, exitCode, options = {}] of [
   ['SIGTERM', 'start', 143, { cleanup: true }],
   ['SIGINT', 'create', 130, { suite: 'pharmacy-ledger' }],
   ['SIGTERM', 'start', 143, { suite: 'pharmacy-ledger' }],
+  ['SIGINT', 'create', 130, { suite: 'pharmacy-dispensing' }],
+  ['SIGTERM', 'start', 143, { suite: 'pharmacy-dispensing' }],
 ]) {
   const scenario = options.cleanup
     ? 'during cleanup preserves resource removal'
@@ -676,10 +678,15 @@ test('isolated Prisma client paths stay in runner temp storage and never resolve
 test('suite selection rejects unknown or additional arguments before resources', async () => {
   assert.equal(parseSuite([]), 'odontogram');
   assert.equal(parseSuite(['--suite=pharmacy-ledger']), 'pharmacy-ledger');
+  assert.equal(
+    parseSuite(['--suite=pharmacy-dispensing']),
+    'pharmacy-dispensing',
+  );
   for (const args of [
     ['--suite=other'],
     ['--suite=odontogram'],
     ['--suite=pharmacy-ledger', 'extra'],
+    ['--suite=pharmacy-dispensing', 'extra'],
   ]) {
     assert.throws(() => parseSuite(args), /Unsupported/);
   }
