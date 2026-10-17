@@ -405,7 +405,12 @@ function validateTrainingPostgresMounts(context, containerJson) {
   });
 }
 
-function validateContainerSettings(container, state, phase) {
+function validateContainerSettings(
+  container,
+  state,
+  phase,
+  networkMemberCount,
+) {
   if (
     container.Id !== state.container.id ||
     container.Image !== state.imageId ||
@@ -457,11 +462,19 @@ function validateContainerSettings(container, state, phase) {
     !isRecord(networkSettings.Networks[state.name])
   )
     return false;
-  if (networkSettings.Networks[state.name].NetworkID !== state.network.id)
+  const endpoint = networkSettings.Networks[state.name];
+  if (
+    endpoint.NetworkID !== state.network.id &&
+    !(
+      phase === 'created' &&
+      endpoint.NetworkID === '' &&
+      endpoint.EndpointID === '' &&
+      networkMemberCount === 0
+    )
+  )
     rejectIsolationObservation('network_id');
   if (!isRecord(networkSettings.Ports))
     rejectIsolationObservation('ports_shape');
-  const endpoint = networkSettings.Networks[state.name];
   if (
     endpoint.EndpointID !== undefined &&
     endpoint.EndpointID !== '' &&
@@ -538,7 +551,7 @@ function validateTrainingPostgresIsolation(
   }
   if (
     !isRecord(container) ||
-    !validateContainerSettings(container, state, phase)
+    !validateContainerSettings(container, state, phase, network.memberCount)
   )
     rejectIsolationObservation();
   const networkMembers = networkInspection.Containers;
@@ -548,9 +561,13 @@ function validateTrainingPostgresIsolation(
     if (
       !member ||
       member.Name !== state.name ||
-      (member.EndpointID !== '' &&
-        endpoint.EndpointID !== '' &&
-        member.EndpointID !== endpoint.EndpointID)
+      (phase === 'running'
+        ? !/^[a-f\d]{64}$/.test(member.EndpointID) ||
+          !/^[a-f\d]{64}$/.test(endpoint.EndpointID) ||
+          member.EndpointID !== endpoint.EndpointID
+        : member.EndpointID !== '' &&
+          endpoint.EndpointID !== '' &&
+          member.EndpointID !== endpoint.EndpointID)
     )
       rejectIsolationObservation();
   }

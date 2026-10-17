@@ -181,6 +181,13 @@ volume metadata. Its frozen result contains only fixed ownership and safety
 metadata; it grants no cleanup authority and does not constitute live Docker
 evidence. The caller must serialize inspection against recovery finalization.
 
+Before endpoint allocation, the created phase may report an explicitly empty
+container endpoint `NetworkID` only when its `EndpointID` is also explicitly
+empty and the inspected network has no members. Missing or malformed identities,
+an allocated endpoint with an empty network ID, and any running endpoint without
+matching non-empty member and container endpoint IDs are rejected. The exact
+registered network ID remains accepted in either phase.
+
 For the actual bind observation, `Mode` may be absent, empty, or exactly `ro`;
 `RW` must still be `false`, and the planned mount must still be `ReadOnly: true`
 with the exact owned source and destination. This accepts Docker 29.7.2's

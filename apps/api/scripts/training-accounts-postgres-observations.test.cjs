@@ -558,6 +558,89 @@ it('accepts registered container isolation only for created and running phases',
   );
 });
 
+it('accepts an explicitly empty network identity before endpoint allocation', async () => {
+  const context = await preparedIsolationContext();
+  const container = containerObservation(context, 'created');
+  container.NetworkSettings.Networks[context.name].NetworkID = '';
+  container.NetworkSettings.Ports = {};
+
+  assert.equal(
+    validateIsolation(
+      context,
+      container,
+      isolationNetwork(context, 'created'),
+      'created',
+    ).phase,
+    'created',
+  );
+});
+
+it('rejects a running network member without its allocated endpoint identity', async () => {
+  const context = await preparedIsolationContext();
+  const network = isolationNetwork(context, 'running', {
+    Containers: { [CONTAINER_ID]: endpoint(context.name, { EndpointID: '' }) },
+  });
+
+  assert.throws(
+    () => validateIsolation(context, containerObservation(context), network),
+    { message: ISOLATION_REJECTION },
+  );
+});
+
+it('rejects missing, malformed, foreign, or premature network identities', async () => {
+  const context = await preparedIsolationContext();
+  for (const phase of ['created', 'running']) {
+    for (const networkId of [undefined, null, 17, 'e'.repeat(64)]) {
+      const container = containerObservation(context, phase);
+      const endpoint = container.NetworkSettings.Networks[context.name];
+      if (networkId === undefined) delete endpoint.NetworkID;
+      else endpoint.NetworkID = networkId;
+      assert.throws(
+        () =>
+          validateIsolation(
+            context,
+            container,
+            isolationNetwork(context, phase),
+            phase,
+          ),
+        { message: ISOLATION_REJECTION },
+        `${phase} must reject NetworkID ${String(networkId)}`,
+      );
+    }
+  }
+
+  const allocatedEndpoint = containerObservation(context, 'created');
+  allocatedEndpoint.NetworkSettings.Networks[context.name].NetworkID = '';
+  allocatedEndpoint.NetworkSettings.Networks[context.name].EndpointID =
+    'd'.repeat(64);
+  assert.throws(
+    () =>
+      validateIsolation(
+        context,
+        allocatedEndpoint,
+        isolationNetwork(context, 'created'),
+        'created',
+      ),
+    { message: ISOLATION_REJECTION },
+  );
+
+  const memberPresent = containerObservation(context, 'created');
+  memberPresent.NetworkSettings.Networks[context.name].NetworkID = '';
+  memberPresent.NetworkSettings.Networks[context.name].EndpointID = '';
+  assert.throws(
+    () =>
+      validateIsolation(
+        context,
+        memberPresent,
+        isolationNetwork(context, 'created', {
+          Containers: { [CONTAINER_ID]: endpoint(context.name) },
+        }),
+        'created',
+      ),
+    { message: ISOLATION_REJECTION },
+  );
+});
+
 it('accepts only absent, empty, or exact readonly actual bind modes without relaxing isolation', async () => {
   const context = await preparedIsolationContext();
   const allowedModes = [undefined, '', 'ro'];
