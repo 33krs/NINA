@@ -89,22 +89,28 @@ returns recorded allocations without writes. Reusing an event ID for a different
 prescription, item or quantity rejects; a concurrent global ID collision escapes
 the transaction without blind retry. No historical balance snapshot is invented.
 Mock tests verify orchestration and failure propagation, not PostgreSQL rollback
-or concurrency. Isolated database proof, Redis wrapper, module registration and
-HTTP endpoints remain pending; this service is not yet exposed by the application.
+or concurrency. See the isolated database proof below. Redis runtime proof,
+module registration and HTTP endpoints remain pending; neither service is yet
+exposed by the application.
 
-### Pharmacy Redis lease adapter (not registered)
+### Internal Redis admission facade (not registered)
 
-`PharmacyLockService` owns a pharmacy-scoped `PHARMACY_REDIS` dependency.
-`createPharmacyRedis(url)` requires an explicit URL, never discovers environment
-configuration, and does not connect eagerly. Connection and command deadlines are
-1.5 seconds, with no offline queue or automatic reconnect. Lazy connections are
-coalesced; failed attempts may be retried by the next acquisition.
+`LockedPharmacyDispensingService` validates the request before Redis, then acquires
+a prescription-scoped lease with a fresh owner UUID per attempt (not the event
+UUID). The exact prescription ID is JSON-encoded without normalization. Busy
+leases reject with 409; connection/command errors or unexpected replies reject
+with a sanitized 503 before any transactional call. On acquisition, the facade
+delegates once and preserves the exact transaction result or original error.
 
-Acquisition uses `SET NX PX` with a ten-second lease; release compares the owner
-before deleting, and cleanup diagnostics are sanitized. Shutdown destroys only an
-opened owned client. Direct dependency-double tests verify this adapter contract,
-not a live Redis server. The dispensing facade, module/API registration and real
-Redis proof remain pending. PostgreSQL must retain correctness after lease expiry.
+`PharmacyLockService` uses pharmacy-owned `PHARMACY_REDIS`, lazy coalesced connects,
+bounded 1.5-second sockets/commands and `SET NX PX` with a ten-second lease. Its
+explicit-URL factory reads no environment and never connects eagerly. Finally
+release uses owner-checked Lua; an expired predecessor cannot delete a successor's
+lease, and release failure logs only a fixed warning without masking the outcome.
+Shutdown destroys only its opened client. Module/configuration/API registration
+and actual Redis runtime proof remain pending. Dependency-double tests are not
+live Redis evidence. PostgreSQL row locks, stock checks and event uniqueness remain
+the correctness authority if a transaction outlives its Redis lease.
 
 ### Calendar-date batch expiry
 
