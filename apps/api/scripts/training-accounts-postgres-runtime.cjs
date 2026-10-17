@@ -106,6 +106,8 @@ async function runTrainingAccountPostgresProof({ signal } = {}) {
   };
   let fixture;
   let stage = 'image_inspect';
+  let inspectionPhase;
+  let inspectionValidator = false;
   let proofSucceeded = false;
   try {
     cancelled(signal);
@@ -142,8 +144,12 @@ async function runTrainingAccountPostgresProof({ signal } = {}) {
     cancelled(signal);
 
     stage = 'resource_inspect';
+    inspectionPhase = 'network_created';
+    inspectionValidator = false;
     const networkJson = await command(fixture, 'inspect_network');
+    inspectionValidator = true;
     validateTrainingPostgresNetwork(context, networkJson, 'created');
+    inspectionValidator = false;
 
     stage = 'container_create';
     const containerArgs = trainingAccountPostgresCommand(
@@ -162,28 +168,36 @@ async function runTrainingAccountPostgresProof({ signal } = {}) {
     cancelled(signal);
 
     stage = 'resource_inspect';
+    inspectionPhase = 'container_created';
+    inspectionValidator = false;
     let containerJson = await command(fixture, 'inspect_container');
     let currentNetworkJson = await command(fixture, 'inspect_network');
+    inspectionValidator = true;
     validateTrainingPostgresIsolation(
       context,
       containerJson,
       currentNetworkJson,
       'created',
     );
+    inspectionValidator = false;
 
     stage = 'container_start';
     await command(fixture, 'start_container');
     cancelled(signal);
 
     stage = 'resource_inspect';
+    inspectionPhase = 'container_running';
+    inspectionValidator = false;
     containerJson = await command(fixture, 'inspect_container');
     currentNetworkJson = await command(fixture, 'inspect_network');
+    inspectionValidator = true;
     validateTrainingPostgresIsolation(
       context,
       containerJson,
       currentNetworkJson,
       'running',
     );
+    inspectionValidator = false;
 
     stage = 'readiness';
     await command(fixture, 'wait_ready', { timeout: TIMEOUT_MS.readiness });
@@ -207,7 +221,12 @@ async function runTrainingAccountPostgresProof({ signal } = {}) {
     proofSucceeded = true;
   } catch (error) {
     try {
-      await reportFailure(context, stage, error);
+      await reportFailure(context, stage, error, {
+        inspectionPhase:
+          stage === 'resource_inspect' ? inspectionPhase : undefined,
+        includeInspectionPredicate:
+          stage === 'resource_inspect' && inspectionValidator,
+      });
     } catch {
       // Diagnostics are best-effort and must not replace the fixed safe result.
     }

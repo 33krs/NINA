@@ -25,6 +25,15 @@ const ENDPOINT_KEYS = Object.freeze([
   'IPv4Address',
   'IPv6Address',
 ]);
+const INSPECTION_PREDICATES = new Set([
+  'network_observation',
+  'isolation_observation',
+  'mount_observation',
+  'network_id',
+  'ports_shape',
+  'planned_bind_options',
+  'actual_bind_mode',
+]);
 
 function rejectObservation() {
   throw new Error('Training-account PostgreSQL image observation rejected');
@@ -106,8 +115,12 @@ function validateTrainingPostgresImage(imageJson, expectedArchitecture) {
   });
 }
 
-function rejectNetworkObservation() {
-  throw new Error('Training-account PostgreSQL network observation rejected');
+function rejectNetworkObservation(predicate = 'network_observation') {
+  const error = new Error(
+    'Training-account PostgreSQL network observation rejected',
+  );
+  error.inspectionPredicate = predicate;
+  throw error;
 }
 
 function exactKeys(value, keys) {
@@ -223,12 +236,20 @@ function validateTrainingPostgresNetwork(context, networkJson, phase) {
   });
 }
 
-function rejectIsolationObservation() {
-  throw new Error('Training-account PostgreSQL isolation observation rejected');
+function rejectIsolationObservation(predicate = 'isolation_observation') {
+  const error = new Error(
+    'Training-account PostgreSQL isolation observation rejected',
+  );
+  error.inspectionPredicate = predicate;
+  throw error;
 }
 
-function rejectMountObservation() {
-  throw new Error('Training-account PostgreSQL mount observation rejected');
+function rejectMountObservation(predicate = 'mount_observation') {
+  const error = new Error(
+    'Training-account PostgreSQL mount observation rejected',
+  );
+  error.inspectionPredicate = predicate;
+  throw error;
 }
 
 function noPublishedPorts(value) {
@@ -273,12 +294,14 @@ function validateActualMounts(mounts, proofSql) {
             'rshared',
             'slave',
             'rslave',
-          ].includes(mount.Propagation)) ||
-        (mount.Mode !== undefined &&
-          (typeof mount.Mode !== 'string' ||
-            !/(?:^|,)ro(?:,|$)/.test(mount.Mode)))
+          ].includes(mount.Propagation))
       )
         return false;
+      if (
+        mount.Mode !== undefined &&
+        (typeof mount.Mode !== 'string' || !/(?:^|,)ro(?:,|$)/.test(mount.Mode))
+      )
+        rejectMountObservation('actual_bind_mode');
       proofMounts += 1;
       if (proofMounts > 1) return false;
       continue;
@@ -336,7 +359,11 @@ function validateMountSettings(container, proofSql) {
     plannedMount.Target !== PROOF_PATH ||
     plannedMount.ReadOnly !== true ||
     (plannedMount.Consistency !== undefined &&
-      !['', 'default'].includes(plannedMount.Consistency)) ||
+      !['', 'default'].includes(plannedMount.Consistency))
+  )
+    return false;
+
+  if (
     ['BindOptions', 'VolumeOptions', 'TmpfsOptions'].some(
       (key) =>
         plannedMount[key] !== undefined &&
@@ -345,7 +372,7 @@ function validateMountSettings(container, proofSql) {
           Object.keys(plannedMount[key]).length !== 0),
     )
   )
-    return false;
+    rejectMountObservation('planned_bind_options');
 
   return validateActualMounts(container.Mounts, proofSql);
 }
@@ -354,7 +381,9 @@ function validateTrainingPostgresMounts(context, containerJson) {
   let artifacts;
   try {
     artifacts = validatePreparedArtifacts(context);
-  } catch {
+  } catch (error) {
+    if (INSPECTION_PREDICATES.has(error?.inspectionPredicate))
+      rejectMountObservation(error.inspectionPredicate);
     rejectMountObservation();
   }
   if (
@@ -428,11 +457,13 @@ function validateContainerSettings(container, state, phase) {
     !isRecord(networkSettings) ||
     !isRecord(networkSettings.Networks) ||
     !exactKeys(networkSettings.Networks, [state.name]) ||
-    !isRecord(networkSettings.Networks[state.name]) ||
-    networkSettings.Networks[state.name].NetworkID !== state.network.id ||
-    !isRecord(networkSettings.Ports)
+    !isRecord(networkSettings.Networks[state.name])
   )
     return false;
+  if (networkSettings.Networks[state.name].NetworkID !== state.network.id)
+    rejectIsolationObservation('network_id');
+  if (!isRecord(networkSettings.Ports))
+    rejectIsolationObservation('ports_shape');
   const endpoint = networkSettings.Networks[state.name];
   if (
     endpoint.EndpointID !== undefined &&
@@ -469,7 +500,9 @@ function validateTrainingPostgresIsolation(
     validatePreparedArtifacts(context);
     network = validateTrainingPostgresNetwork(context, networkJson, phase);
     mounts = validateTrainingPostgresMounts(context, containerJson);
-  } catch {
+  } catch (error) {
+    if (INSPECTION_PREDICATES.has(error?.inspectionPredicate))
+      rejectIsolationObservation(error.inspectionPredicate);
     rejectIsolationObservation();
   }
   if (

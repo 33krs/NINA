@@ -145,14 +145,14 @@ Image `Config.User` may be omitted or explicitly empty; any other explicit value
 is rejected. This image-metadata rule does not relax the separate container
 isolation requirement that the actual container `Config.User` is exactly `0`.
 
-Recovery manifests accept optional, closed `resource_inspect` metadata only:
-inspection phases `network_created`, `container_created`, and
-`container_running`, and predicates `network_observation`,
-`isolation_observation`, `mount_observation`, `network_id`, `ports_shape`,
-`planned_bind_options`, and `actual_bind_mode`. The fields are validated when a
-manifest is reopened; all remain optional so existing version-one and
-version-two manifests are still readable. Raw inspection values, error text,
-paths, environment data, and credentials are never persisted.
+Resource-inspection recovery diagnostics may include one closed inspection phase
+(`network_created`, `container_created`, or `container_running`) and a fixed
+predicate such as `network_id`, `ports_shape`, `planned_bind_options`, or
+`actual_bind_mode`. Other predicate values identify only a broad validator
+group. Command failures record the phase without claiming a validator
+predicate. Raw inspection values, error text, paths, environment data, and
+credentials are never persisted; older version-one and version-two recovery
+manifests remain readable without these optional fields.
 
 The same module's `validateTrainingPostgresNetwork()` checks one bounded
 network-inspection object against a factory-owned recovery context. It requires
