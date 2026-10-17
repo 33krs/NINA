@@ -6,6 +6,10 @@ const path = require('node:path');
 const { spawn } = require('node:child_process');
 const {
   dockerArgs,
+  parseSuite,
+  prepareIsolatedClient,
+  writePostgresEnvironment,
+  copyMigrationStage,
   ownedContainerId,
   reconcileOwnedResources,
   createCancellation,
@@ -57,6 +61,15 @@ else if (args[0] === 'network' && args[1] === 'create') {
   }));
   console.log('owned-network');
 } else if (args[0] === 'create') {
+  if (options.suite) {
+    const envFile = args[args.indexOf('--env-file') + 1];
+    if (!envFile || (fs.statSync(envFile).mode & 0o777) !== 0o600) throw new Error('credentials are not private');
+    const env = fs.readFileSync(envFile, 'utf8');
+    const secret = env.match(/^POSTGRES_PASSWORD=(.+)$/m)?.[1];
+    if (!secret || args.some(arg => arg.includes(secret) || arg.includes('trust')) ||
+      !env.includes('POSTGRES_HOST_AUTH_METHOD=scram-sha-256')) throw new Error('unsafe credential delivery');
+    if (process.env.DATABASE_URL || process.env.PGHOST || process.env.SSH_AUTH_SOCK) throw new Error('ambient credentials escaped allowlist');
+  }
   fs.writeFileSync(file('container'), JSON.stringify({
     Id: 'owned-container', Name: '/' + args[args.indexOf('--name') + 1],
     Config: { Image: 'postgres:15-alpine', Labels: labels() }
@@ -113,6 +126,10 @@ for (const [signal, phase, exitCode, options = {}] of [
   ['SIGTERM', 'start', 143, { descendant: true }],
   ['SIGINT', 'start', 130, { cleanup: true }],
   ['SIGTERM', 'start', 143, { cleanup: true }],
+  ['SIGINT', 'create', 130, { suite: 'pharmacy-ledger' }],
+  ['SIGTERM', 'start', 143, { suite: 'pharmacy-ledger' }],
+  ['SIGINT', 'create', 130, { suite: 'pharmacy-dispensing' }],
+  ['SIGTERM', 'start', 143, { suite: 'pharmacy-dispensing' }],
 ]) {
   const scenario = options.cleanup
     ? 'during cleanup preserves resource removal'
@@ -142,9 +159,16 @@ for (const [signal, phase, exitCode, options = {}] of [
       [
         ...(options.cleanup ? ['--require', observer] : []),
         path.join(__dirname, 'verify-odontogram-postgres.cjs'),
+        ...(options.suite ? [`--suite=${options.suite}`] : []),
       ],
       {
-        env: { PATH: root, HOME: root },
+        env: {
+          PATH: root,
+          HOME: root,
+          DATABASE_URL: 'postgresql://ambient.invalid/database',
+          PGHOST: 'ambient.invalid',
+          SSH_AUTH_SOCK: '/ambient/socket',
+        },
       },
     );
     let result;
@@ -328,15 +352,144 @@ for (const [signal, phase, exitCode, options = {}] of [
 
 test('async subprocesses retain stdout and nonzero status with stderr', async () => {
   assert.equal(
-    await run(process.execPath, ['-e', 'console.log(" complete ")']),
+    await run('/bin/sh', ['-c', 'printf %s "$1"', 'runner-test', ' complete ']),
     'complete',
   );
+  assert.equal(
+    await run(
+      '/bin/sh',
+      ['-c', 'printf %s "$1"', 'runner-test', ' complete '],
+      { preserveStdout: false },
+    ),
+    'complete',
+  );
+  const exactOutput = '  café\r\n\n';
+  assert.equal(
+    await run('/bin/sh', ['-c', 'printf %s "$1"', 'runner-test', exactOutput], {
+      preserveStdout: true,
+    }),
+    exactOutput,
+  );
   await assert.rejects(
-    run(process.execPath, [
-      '-e',
-      'console.error("expected failure"); process.exit(7)',
+    run('/bin/sh', [
+      '-c',
+      'printf %s "$1" >&2; exit 7',
+      'runner-test',
+      'expected failure',
     ]),
     (error) => error.status === 7 && error.stderr.trim() === 'expected failure',
+  );
+  await assert.rejects(
+    run(
+      '/bin/sh',
+      ['-c', 'printf %s "$1" >&2; exit 7', 'runner-test', 'private_marker'],
+      { preserveStdout: true, redactions: ['private_marker'] },
+    ),
+    (error) => {
+      assert.equal(error.status, 7);
+      assert.doesNotMatch(error.message + error.stderr, /private_marker/);
+      return true;
+    },
+  );
+});
+
+test('stdout preservation snapshots one boolean and rejects unsafe options before spawn', async () => {
+  let reads = 0;
+  const changing = {
+    get preserveStdout() {
+      reads += 1;
+      return reads === 1;
+    },
+  };
+  assert.equal(
+    await run(
+      '/bin/sh',
+      ['-c', 'printf %s "$1"', 'runner-test', ' retained '],
+      changing,
+    ),
+    ' retained ',
+  );
+  assert.equal(reads, 1);
+
+  const marker = path.join(os.tmpdir(), `nina-run-not-started-${process.pid}`);
+  fs.rmSync(marker, { force: true });
+  for (const options of [
+    { preserveStdout: 'true' },
+    Object.defineProperty({}, 'preserveStdout', {
+      get() {
+        throw new Error(marker);
+      },
+    }),
+  ]) {
+    await assert.rejects(
+      run('/bin/sh', ['-c', 'touch "$1"', 'runner-test', marker], options),
+      { message: 'Invalid stdout preservation option' },
+    );
+    assert.equal(fs.existsSync(marker), false);
+  }
+});
+
+test('preserved stdout is not trimmed into a valid SQL receipt', async () => {
+  const {
+    parseTrainingAccountSqlReceipt,
+    trainingAccountSqlCheckpoint,
+  } = require('./training-accounts-postgres-receipt.cjs');
+  const runId = require('node:crypto').randomUUID();
+  const checkpoints = [
+    'table_empty_before',
+    'role_enum_values',
+    'role_has_no_default',
+    'username_c_collation',
+    'valid_username_boundaries',
+    'explicit_roles_and_defaults',
+    'role_default',
+    'username_null',
+    'username_noncanonical',
+    'username_too_short',
+    'auth_version_negative',
+    'username_duplicate',
+    'table_empty_after',
+    'table_empty_after_rollback',
+    'proof_complete',
+  ];
+  const receipt = `${checkpoints
+    .map((checkpoint) =>
+      trainingAccountSqlCheckpoint(runId, checkpoint).slice(
+        "SELECT '".length,
+        -"' AS proof_record;".length,
+      ),
+    )
+    .join('\n')}`;
+  const unpadded = await run(
+    '/bin/sh',
+    ['-c', 'printf "%s" "$1"', 'runner-test', receipt],
+    { preserveStdout: true },
+  );
+  assert.equal(unpadded, receipt);
+  assert.equal(
+    parseTrainingAccountSqlReceipt(unpadded, runId, 0).complete,
+    true,
+  );
+
+  const prefixed = `  ${receipt}`;
+  const preserved = await run(
+    '/bin/sh',
+    ['-c', 'printf "%s" "$1"', 'runner-test', prefixed],
+    { preserveStdout: true },
+  );
+  assert.equal(preserved, prefixed);
+  assert.throws(() => parseTrainingAccountSqlReceipt(preserved, runId, 0));
+
+  const trimmed = await run('/bin/sh', [
+    '-c',
+    'printf "%s" "$1"',
+    'runner-test',
+    prefixed,
+  ]);
+  assert.equal(trimmed, receipt);
+  assert.equal(
+    parseTrainingAccountSqlReceipt(trimmed, runId, 0).complete,
+    true,
   );
 });
 
@@ -349,22 +502,54 @@ test('async subprocesses preserve spawn errors', async () => {
 test('async subprocess timeout force-kills an uncooperative owned child', async () => {
   const startedAt = Date.now();
   await assert.rejects(
-    run(
-      process.execPath,
-      ['-e', 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000)'],
-      { timeout: 500 },
-    ),
+    run('/bin/sh', ['-c', 'trap "" TERM; while :; do sleep 1; done'], {
+      timeout: 500,
+      preserveStdout: true,
+    }),
     { code: 'ETIMEDOUT', killed: true },
   );
   assert.ok(Date.now() - startedAt < 2500);
 });
 
+test('preserved-output cancellation settles the child process group before rejecting', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-preserve-cancel-'));
+  const pidFile = path.join(root, 'child-pids');
+  const controller = new AbortController();
+  const childRun = run(
+    '/bin/sh',
+    [
+      '-c',
+      'sleep 30 & child=$!; printf "%s %s\\n" "$$" "$child" > "$1"; trap "" TERM; while :; do sleep 1; done',
+      'runner-test',
+      pidFile,
+    ],
+    { signal: controller.signal, preserveStdout: true, timeout: 5000 },
+  );
+  try {
+    await waitUntil(
+      () => fs.existsSync(pidFile),
+      'child process did not start',
+    );
+    const [parentPid, descendantPid] = fs
+      .readFileSync(pidFile, 'utf8')
+      .trim()
+      .split(/\s+/)
+      .map(Number);
+    controller.abort();
+    await assert.rejects(childRun, /cancelled by signal/);
+    for (const pid of [parentPid, descendantPid])
+      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  } finally {
+    controller.abort();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('async subprocess output remains bounded', async () => {
   await assert.rejects(
-    run(process.execPath, [
-      '-e',
-      'process.stdout.write(Buffer.alloc(9 * 1024 * 1024)); setInterval(() => {}, 1000)',
-    ]),
+    run('/bin/sh', ['-c', 'head -c 9437185 /dev/zero; sleep 5'], {
+      preserveStdout: true,
+    }),
     { code: 'ENOBUFS', killed: true },
   );
 });
@@ -397,6 +582,8 @@ test('subprocess environment excludes ambient database and credential values', (
     HOME: '/tmp/nina-suite',
     TMPDIR: '/tmp/nina-suite',
     DATABASE_URL: 'postgresql://suite@127.0.0.1:49152/suite',
+    PRISMA_GENERATE_SKIP_AUTOINSTALL: '1',
+    CHECKPOINT_DISABLE: '1',
     NINA_ODONTOGRAM_PG15_RUN_ID: 'run-123',
     NINA_ODONTOGRAM_PG15_PROOF_FILE: '/tmp/nina-suite/proof.json',
     NINA_ODONTOGRAM_PG15_TESTS: '1',
@@ -647,4 +834,425 @@ test('isolated Prisma client paths stay in runner temp storage and never resolve
       schemaEnvPath: '/repo/apps/api/.env',
     }),
   );
+});
+
+test('suite selection rejects unknown or additional arguments before resources', async () => {
+  assert.equal(parseSuite([]), 'odontogram');
+  assert.equal(parseSuite(['--suite=pharmacy-ledger']), 'pharmacy-ledger');
+  assert.equal(
+    parseSuite(['--suite=pharmacy-dispensing']),
+    'pharmacy-dispensing',
+  );
+  for (const args of [
+    ['--suite=other'],
+    ['--suite=odontogram'],
+    ['--suite=pharmacy-ledger', 'extra'],
+    ['--suite=pharmacy-dispensing', 'extra'],
+  ]) {
+    assert.throws(() => parseSuite(args), /Unsupported/);
+  }
+  await assert.rejects(
+    run(
+      process.execPath,
+      [path.join(__dirname, 'verify-odontogram-postgres.cjs'), '--suite=other'],
+      { env: { PATH: '/nonexistent' } },
+    ),
+    /Unsupported/,
+  );
+});
+
+test('pharmacy credentials use a private exclusive file without password argv', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-auth-test-'));
+  try {
+    const file = writePostgresEnvironment(
+      root,
+      'db_random',
+      'user_random',
+      'random_secret',
+    );
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    assert.equal(
+      fs.readFileSync(file, 'utf8'),
+      'POSTGRES_DB=db_random\nPOSTGRES_USER=user_random\nPOSTGRES_PASSWORD=random_secret\nPOSTGRES_HOST_AUTH_METHOD=scram-sha-256\nPOSTGRES_INITDB_ARGS=--auth-host=scram-sha-256\nPGPASSWORD=random_secret\n',
+    );
+    assert.throws(
+      () => writePostgresEnvironment(root, 'db', 'user', 'secret'),
+      { code: 'EEXIST' },
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('pharmacy migration stage omits only ledger then adds it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-stage-test-'));
+  const apiRoot = path.resolve(__dirname, '..');
+  const ledger = '20261010140000_add_prescription_dispensing';
+  try {
+    copyMigrationStage(apiRoot, root, false, 'pharmacy-ledger');
+    const names = fs
+      .readdirSync(path.join(root, 'prisma', 'migrations'))
+      .sort();
+    assert.deepEqual(
+      names,
+      fs
+        .readdirSync(path.join(apiRoot, 'prisma', 'migrations'))
+        .filter((name) => name !== ledger)
+        .sort(),
+    );
+    assert.equal(fs.existsSync(path.join(root, 'prisma', '.env')), false);
+    copyMigrationStage(apiRoot, root, true, 'pharmacy-ledger');
+    assert.ok(
+      fs.existsSync(
+        path.join(root, 'prisma', 'migrations', ledger, 'migration.sql'),
+      ),
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('all subprocess error fields redact fresh passwords and datasource URLs', async () => {
+  const secret = 'fresh_secret';
+  const url = `postgresql://user:${secret}@127.0.0.1:5432/random`;
+  const redactions = [secret, url];
+  await assert.rejects(
+    run(
+      process.execPath,
+      [
+        '-e',
+        `console.error(${JSON.stringify(url + ' ' + secret)}); process.exit(7)`,
+      ],
+      { redactions },
+    ),
+    (error) => {
+      assert.equal(error.status, 7);
+      assert.doesNotMatch(
+        error.message + error.stderr + error.stack,
+        /fresh_secret|postgresql:/,
+      );
+      assert.match(error.stderr, /REDACTED/);
+      return true;
+    },
+  );
+  await assert.rejects(
+    run(`/nonexistent/${secret}`, [], { redactions }),
+    (error) => {
+      assert.equal(error.code, 'ENOENT');
+      assert.doesNotMatch(
+        error.message + error.stderr + error.stack,
+        /fresh_secret/,
+      );
+      return true;
+    },
+  );
+});
+
+test('fixed diagnostic stages emit only STARTED and PASSED labels', async () => {
+  const messages = [];
+  const original = console.log;
+  console.log = (message) => messages.push(message);
+  try {
+    for (const stage of [
+      'prisma-generate',
+      'migrate-predecessors',
+      'migrate-history',
+    ]) {
+      assert.equal(
+        await run(process.execPath, ['-e', 'console.log("fresh_secret")'], {
+          stage,
+        }),
+        'fresh_secret',
+      );
+      assert.deepEqual(messages.splice(0), [
+        `PG15_STAGE_STARTED ${stage}`,
+        `PG15_STAGE_PASSED ${stage}`,
+      ]);
+    }
+  } finally {
+    console.log = original;
+  }
+});
+
+test('stage failure context follows redaction and identifies bounded timeouts', async () => {
+  const messages = [];
+  const original = console.log;
+  console.log = (message) => messages.push(message);
+  try {
+    for (const [stage, args, timeout, expected] of [
+      [
+        'prisma-generate',
+        ['-e', 'console.error("fresh_secret"); process.exit(7)'],
+        1000,
+        { status: 7 },
+      ],
+      [
+        'migrate-history',
+        ['-e', 'setInterval(() => {}, 1000)'],
+        20,
+        { code: 'ETIMEDOUT', killed: true },
+      ],
+    ]) {
+      await assert.rejects(
+        run(process.execPath, args, {
+          stage,
+          timeout,
+          redactions: ['fresh_secret'],
+        }),
+        (error) => {
+          for (const [key, value] of Object.entries(expected))
+            assert.equal(error[key], value);
+          assert.equal(error.stage, stage);
+          assert.doesNotMatch(
+            error.message + error.stderr + error.stack,
+            /fresh_secret/,
+          );
+          return true;
+        },
+      );
+      assert.deepEqual(messages.splice(0), [
+        `PG15_STAGE_STARTED ${stage}`,
+        `PG15_STAGE_FAILED ${stage}`,
+      ]);
+    }
+  } finally {
+    console.log = original;
+  }
+});
+
+test('unknown diagnostic labels are rejected before launching without echoing input', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-stage-label-test-'));
+  const marker = path.join(root, 'launched');
+  try {
+    await assert.rejects(
+      run(
+        process.execPath,
+        [
+          '-e',
+          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'launched')`,
+        ],
+        { stage: 'fresh_secret' },
+      ),
+      (error) => {
+        assert.match(error.message, /Unknown diagnostic stage/);
+        assert.doesNotMatch(error.message + error.stack, /fresh_secret/);
+        return true;
+      },
+    );
+    assert.equal(fs.existsSync(marker), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function copiedClientFixture(root) {
+  const apiRoot = path.resolve(__dirname, '..');
+  const schema = path.join(root, 'prisma', 'schema.prisma');
+  fs.mkdirSync(path.dirname(schema));
+  fs.copyFileSync(path.join(apiRoot, 'prisma', 'schema.prisma'), schema);
+  return { apiRoot, schema };
+}
+
+test('temporary generator resolution links only the installed client and cleanup preserves it', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-client-link-test-'));
+  const { apiRoot, schema } = copiedClientFixture(root);
+  const packagePath = require.resolve('@prisma/client/package.json', {
+    paths: [apiRoot],
+  });
+  const packageBytes = fs.readFileSync(packagePath);
+  try {
+    assert.equal(
+      prepareIsolatedClient(schema, root),
+      path.join(root, 'isolated-client', 'index.js'),
+    );
+    const link = path.join(root, 'node_modules', '@prisma', 'client');
+    assert.equal(fs.existsSync(link), true);
+    assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+    assert.equal(
+      fs.realpathSync(link),
+      fs.realpathSync(path.dirname(packagePath)),
+    );
+    assert.equal(fs.existsSync(path.join(root, 'prisma', '.env')), false);
+    assert.match(
+      fs.readFileSync(schema, 'utf8'),
+      /output = "..\/isolated-client"/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  assert.deepEqual(fs.readFileSync(packagePath), packageBytes);
+});
+
+test('generator preparation refuses public temporary storage and external schema paths', () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nina-client-boundary-test-'),
+  );
+  const external = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nina-client-external-test-'),
+  );
+  const { schema } = copiedClientFixture(root);
+  const externalSchema = path.join(external, 'schema.prisma');
+  fs.copyFileSync(schema, externalSchema);
+  const original = fs.readFileSync(externalSchema);
+  try {
+    assert.throws(
+      () => prepareIsolatedClient(externalSchema, root),
+      /private temporary storage/,
+    );
+    assert.deepEqual(fs.readFileSync(externalSchema), original);
+    fs.chmodSync(root, 0o755);
+    assert.throws(
+      () => prepareIsolatedClient(schema, root),
+      /private temporary storage/,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(external, { recursive: true, force: true });
+  }
+});
+
+// Prisma 6.19.3 get-platform p8e uses this exact read-only libssl probe.
+const LOCAL_LIBSSL_PROBE =
+  'ldconfig -p | sed "s/.*=>s*//" | sed "s|.*/||" | grep libssl | sort | grep -v "libssl.so.0"';
+
+function writeOfflineGenerationGuard(root) {
+  const guard = path.join(root, 'offline-guard.cjs');
+  const refused = path.join(root, 'refused');
+  const probes = path.join(root, 'read-only-probes');
+  fs.writeFileSync(
+    guard,
+    `
+    const fs=require('node:fs'), path=require('node:path'), cp=require('node:child_process');
+    let localProbeActive=false;
+    function deny(kind) { fs.appendFileSync(${JSON.stringify(refused)}, kind+'\\n'); throw new Error('Offline verification refused '+kind); }
+    for (const method of ['spawn','execFile','spawnSync','execFileSync']) {
+      const original=cp[method];
+      cp[method]=function(command,args,...rest) {
+        if (method==='execFile' && localProbeActive && command===${JSON.stringify(LOCAL_LIBSSL_PROBE)} && args?.shell===true && args?.env?.PATH==='/usr/sbin:/usr/bin:/sbin:/bin') return original.call(this,command,args,...rest);
+        const name=path.basename(String(command));
+        if (!['node','openssl','uname','ldd','getconf'].includes(name) && !name.startsWith('schema-engine-')) deny('installer');
+        if (Array.isArray(args) && args.some(arg => /npm-cli|pnpm|yarn|npx/.test(String(arg)))) deny('installer');
+        return original.call(this,command,args,...rest);
+      };
+    }
+    const exec=cp.exec;
+    cp.exec=function(command,callback) {
+      if (command!==${JSON.stringify(LOCAL_LIBSSL_PROBE)} || arguments.length!==2 || typeof callback!=='function') deny('shell');
+      fs.appendFileSync(${JSON.stringify(probes)}, 'libssl\\n');
+      localProbeActive=true;
+      try { return exec.call(this,command,{env:{...process.env,PATH:'/usr/sbin:/usr/bin:/sbin:/bin'}},callback); }
+      finally { localProbeActive=false; }
+    };
+    cp.execSync=()=>deny('shell');
+    for (const module of ['node:http','node:https']) { const m=require(module); m.request=m.get=()=>deny('network'); }
+    require('node:net').Socket.prototype.connect=()=>deny('network');
+    globalThis.fetch=()=>deny('network');
+  `,
+    { mode: 0o600 },
+  );
+  return { guard, refused, probes };
+}
+
+test('offline guard admits only the exact read-only probe and denies shell, installer and network operations', async () => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nina-offline-guard-test-'),
+  );
+  const { guard, refused, probes } = writeOfflineGenerationGuard(root);
+  try {
+    await run(
+      process.execPath,
+      [
+        '--require',
+        guard,
+        '-e',
+        `
+        const assert=require('node:assert/strict'), cp=require('node:child_process');
+        for (const command of ['printf unknown', ${JSON.stringify(LOCAL_LIBSSL_PROBE + '; npm install')}]) {
+          assert.throws(()=>cp.exec(command,()=>{}), /refused shell/);
+        }
+        assert.throws(()=>cp.execSync(${JSON.stringify(LOCAL_LIBSSL_PROBE)}), /refused shell/);
+        assert.throws(()=>cp.exec(${JSON.stringify(LOCAL_LIBSSL_PROBE)},{shell:'/unknown'},()=>{}), /refused shell/);
+        assert.throws(()=>cp.execFile(${JSON.stringify(LOCAL_LIBSSL_PROBE)},{shell:true}), /refused installer/);
+        assert.throws(()=>cp.spawn('npm',['install']), /refused installer/);
+        assert.throws(()=>cp.spawn('node',['npm-cli.js']), /refused installer/);
+        assert.throws(()=>require('node:http').request('http://127.0.0.1:1'), /refused network/);
+        assert.throws(()=>require('node:https').get('https://127.0.0.1:1'), /refused network/);
+        assert.throws(()=>new (require('node:net').Socket)().connect(1,'127.0.0.1'), /refused network/);
+        assert.throws(()=>fetch('http://127.0.0.1:1'), /refused network/);
+        cp.exec(${JSON.stringify(LOCAL_LIBSSL_PROBE)},(error,stdout)=> {
+          assert.equal(error,null);
+          assert.match(stdout,/libssl/);
+        });
+      `,
+      ],
+      { cwd: root, env: { PATH: '/usr/bin:/bin', HOME: root, TMPDIR: root } },
+    );
+    assert.deepEqual(fs.readFileSync(refused, 'utf8').trim().split('\n'), [
+      'shell',
+      'shell',
+      'shell',
+      'shell',
+      'installer',
+      'installer',
+      'installer',
+      'network',
+      'network',
+      'network',
+      'network',
+    ]);
+    assert.equal(fs.readFileSync(probes, 'utf8'), 'libssl\n');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('copied-schema generation succeeds offline without installer or network execution', async (t) => {
+  const root = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'nina-offline-generate-test-'),
+  );
+  const { apiRoot, schema } = copiedClientFixture(root);
+  const { guard, refused, probes } = writeOfflineGenerationGuard(root);
+  try {
+    const client = prepareIsolatedClient(schema, root);
+    await run(
+      process.execPath,
+      [
+        '--require',
+        guard,
+        path.join(apiRoot, 'node_modules', 'prisma', 'build', 'index.js'),
+        'generate',
+        '--schema',
+        schema,
+      ],
+      {
+        cwd: root,
+        timeout: 60000,
+        env: subprocessEnvironment({
+          path: process.env.PATH,
+          home: root,
+          databaseUrl: 'postgresql://offline@127.0.0.1:1/offline?schema=public',
+          runId: 'offline-only',
+          proofFile: path.join(root, 'proof.json'),
+        }),
+      },
+    );
+    assert.equal(fs.existsSync(client), true);
+    assert.equal(
+      fs.existsSync(refused),
+      false,
+      fs.existsSync(refused)
+        ? `forbidden attempt: ${fs.readFileSync(refused, 'utf8')}`
+        : 'no installer or network launch attempted',
+    );
+    assert.equal(fs.existsSync(path.join(root, 'prisma', '.env')), false);
+    const probeCount = fs.existsSync(probes)
+      ? fs.readFileSync(probes, 'utf8').trim().split('\n').length
+      : 0;
+    t.diagnostic(
+      `Offline generation: forbidden attempts=0; read-only libssl probes=${probeCount}`,
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+  assert.equal(fs.existsSync(root), false);
 });
