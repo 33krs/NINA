@@ -57,6 +57,20 @@ const REASONS = new Set([
   'foreign_network_members',
   'resource_present',
 ]);
+const INSPECTION_PHASES = new Set([
+  'network_created',
+  'container_created',
+  'container_running',
+]);
+const INSPECTION_PREDICATES = new Set([
+  'network_observation',
+  'isolation_observation',
+  'mount_observation',
+  'network_id',
+  'ports_shape',
+  'planned_bind_options',
+  'actual_bind_mode',
+]);
 const NODE_CODES = new Set([
   'EACCES',
   'EBUSY',
@@ -312,9 +326,15 @@ function validateDiagnostic(value) {
   if (
     keys.some(
       (key) =>
-        !['stage', 'reason', 'exitStatus', 'nodeCode', 'sqlState'].includes(
-          key,
-        ),
+        ![
+          'stage',
+          'reason',
+          'exitStatus',
+          'nodeCode',
+          'sqlState',
+          'inspectionPhase',
+          'inspectionPredicate',
+        ].includes(key),
     )
   )
     return false;
@@ -324,7 +344,13 @@ function validateDiagnostic(value) {
         value.exitStatus >= 0 &&
         value.exitStatus <= 255)) &&
     (value.nodeCode === undefined || NODE_CODES.has(value.nodeCode)) &&
-    (value.sqlState === undefined || SQLSTATES.has(value.sqlState))
+    (value.sqlState === undefined || SQLSTATES.has(value.sqlState)) &&
+    (value.inspectionPhase === undefined ||
+      (value.stage === 'resource_inspect' &&
+        INSPECTION_PHASES.has(value.inspectionPhase))) &&
+    (value.inspectionPredicate === undefined ||
+      (value.stage === 'resource_inspect' &&
+        INSPECTION_PREDICATES.has(value.inspectionPredicate)))
   );
 }
 
@@ -673,6 +699,7 @@ function snapshotError(error) {
   const exitCode = readOnce(error, 'exitCode');
   const sqlState = readOnce(error, 'sqlState');
   const stderr = readOnce(error, 'stderr');
+  const inspectionPredicate = readOnce(error, 'inspectionPredicate');
   return {
     code: typeof code === 'string' && code.length <= 32 ? code : undefined,
     status,
@@ -683,6 +710,11 @@ function snapshotError(error) {
         : undefined,
     stderr:
       typeof stderr === 'string' && stderr.length <= 2048 ? stderr : undefined,
+    inspectionPredicate:
+      typeof inspectionPredicate === 'string' &&
+      INSPECTION_PREDICATES.has(inspectionPredicate)
+        ? inspectionPredicate
+        : undefined,
   };
 }
 
@@ -709,6 +741,16 @@ function diagnosticFromSnapshot(stage, snapshot, forcedReason) {
   if (sqlState) diagnostic.sqlState = sqlState;
   const nodeCode = NODE_CODES.has(code) ? code : undefined;
   if (nodeCode) diagnostic.nodeCode = nodeCode;
+  if (
+    stage === 'resource_inspect' &&
+    INSPECTION_PHASES.has(snapshot.inspectionPhase)
+  )
+    diagnostic.inspectionPhase = snapshot.inspectionPhase;
+  if (
+    stage === 'resource_inspect' &&
+    INSPECTION_PREDICATES.has(snapshot.inspectionPredicate)
+  )
+    diagnostic.inspectionPredicate = snapshot.inspectionPredicate;
   if (!forcedReason) {
     if (sqlState) diagnostic.reason = 'sqlstate';
     else if (nodeCode) diagnostic.reason = 'node_error';
@@ -724,9 +766,18 @@ function storeDiagnostic(state, diagnostic) {
   writeManifest(state);
 }
 
-function reportFailure(context, stage, error) {
+function reportFailure(
+  context,
+  stage,
+  error,
+  { inspectionPhase, includeInspectionPredicate = true } = {},
+) {
   const state = getState(context);
-  const diagnostic = diagnosticFromSnapshot(stage, snapshotError(error));
+  const snapshot = snapshotError(error);
+  if (stage === 'resource_inspect' && INSPECTION_PHASES.has(inspectionPhase))
+    snapshot.inspectionPhase = inspectionPhase;
+  if (!includeInspectionPredicate) delete snapshot.inspectionPredicate;
+  const diagnostic = diagnosticFromSnapshot(stage, snapshot);
   storeDiagnostic(state, diagnostic);
   return diagnostic;
 }

@@ -431,7 +431,14 @@ describe('training account PostgreSQL recovery foundation', () => {
 
   it('snapshots hostile diagnostic fields once and persists only allowlisted data', () => {
     const context = createContext();
-    const reads = { code: 0, status: 0, sqlState: 0, stderr: 0, message: 0 };
+    const reads = {
+      code: 0,
+      status: 0,
+      sqlState: 0,
+      stderr: 0,
+      inspectionPredicate: 0,
+      message: 0,
+    };
     const error = {};
     Object.defineProperties(error, {
       code: {
@@ -458,6 +465,12 @@ describe('training account PostgreSQL recovery foundation', () => {
           return 'secret stderr contents';
         },
       },
+      inspectionPredicate: {
+        get() {
+          reads.inspectionPredicate++;
+          return 'private-predicate-code';
+        },
+      },
       message: {
         get() {
           reads.message++;
@@ -477,11 +490,12 @@ describe('training account PostgreSQL recovery foundation', () => {
       status: 1,
       sqlState: 1,
       stderr: 1,
+      inspectionPredicate: 1,
       message: 0,
     });
     assert.doesNotMatch(
       persisted,
-      /private-node-code|secret-sqlstate|secret stderr|private message/,
+      /private-node-code|secret-sqlstate|secret stderr|private message|private-predicate-code/,
     );
     assert.throws(() => reportFailure(context, 'untrusted stage', error));
   });
@@ -505,6 +519,144 @@ describe('training account PostgreSQL recovery foundation', () => {
     assert.doesNotMatch(
       fs.readFileSync(context.manifestPath, 'utf8'),
       /secret-changing-code/,
+    );
+  });
+
+  it('persists only a fixed resource-inspection predicate and reopens it', () => {
+    const context = createContext();
+    const error = Object.assign(new Error('private password marker'), {
+      inspectionPredicate: 'network_id',
+    });
+    const diagnostic = reportFailure(context, 'resource_inspect', error);
+    assert.deepEqual(diagnostic, {
+      stage: 'resource_inspect',
+      reason: 'operation_failed',
+      inspectionPredicate: 'network_id',
+    });
+    assert.equal(
+      readRecoveryState(openRecoveryContext(context.root)).diagnostics[0]
+        .inspectionPredicate,
+      'network_id',
+    );
+    assert.doesNotMatch(
+      fs.readFileSync(context.manifestPath, 'utf8'),
+      /password|private|NetworkID/,
+    );
+  });
+
+  it('accepts only closed phase and predicate enums when reopening diagnostics', () => {
+    for (const [field, value, stage] of [
+      ['inspectionPhase', null, 'resource_inspect'],
+      ['inspectionPhase', 'container_running', 'sql_assertion'],
+      ['inspectionPredicate', 'unknown_private_value', 'resource_inspect'],
+      ['inspectionPredicate', 'ports_shape', 'sql_assertion'],
+    ]) {
+      const context = createContext();
+      reportFailure(context, stage, new Error('synthetic safe error'));
+      const manifest = JSON.parse(
+        fs.readFileSync(context.manifestPath, 'utf8'),
+      );
+      manifest.diagnostics[0][field] = value;
+      fs.writeFileSync(context.manifestPath, `${JSON.stringify(manifest)}\n`, {
+        mode: 0o600,
+      });
+      const modulePath =
+        require.resolve('./verify-training-accounts-postgres.cjs');
+      delete require.cache[modulePath];
+      const reopenedModule = require(modulePath);
+      assert.throws(() => reopenedModule.openRecoveryContext(context.root), {
+        message: 'Invalid training proof recovery data',
+      });
+      delete require.cache[modulePath];
+      require(modulePath);
+    }
+    for (const [field, value] of [
+      ['inspectionPhase', 'network_created'],
+      ['inspectionPredicate', 'network_id'],
+    ]) {
+      const context = createContext();
+      reportFailure(
+        context,
+        'resource_inspect',
+        new Error('synthetic safe error'),
+      );
+      const manifest = JSON.parse(
+        fs.readFileSync(context.manifestPath, 'utf8'),
+      );
+      manifest.diagnostics[0][field] = value;
+      fs.writeFileSync(context.manifestPath, `${JSON.stringify(manifest)}\n`, {
+        mode: 0o600,
+      });
+      const modulePath =
+        require.resolve('./verify-training-accounts-postgres.cjs');
+      delete require.cache[modulePath];
+      const reopenedModule = require(modulePath);
+      assert.equal(
+        reopenedModule.openRecoveryContext(context.root).runId,
+        context.runId,
+      );
+      delete require.cache[modulePath];
+      require(modulePath);
+    }
+  });
+
+  it('drops unsafe inspection predicate values without rejecting generic diagnostics', () => {
+    const context = createContext();
+    for (const value of [
+      'private-predicate-secret',
+      null,
+      17,
+      { code: 'EPERM' },
+    ]) {
+      const diagnostic = reportFailure(
+        context,
+        'resource_inspect',
+        Object.defineProperty({}, 'inspectionPredicate', {
+          get() {
+            return value;
+          },
+        }),
+      );
+      assert.equal(Object.hasOwn(diagnostic, 'inspectionPredicate'), false);
+    }
+    const diagnostic = reportFailure(context, 'sql_assertion', {
+      inspectionPredicate: 'network_id',
+    });
+    assert.equal(Object.hasOwn(diagnostic, 'inspectionPredicate'), false);
+  });
+
+  it('reads hostile predicate getters once and never persists their values', () => {
+    const context = createContext();
+    let changingReads = 0;
+    let throwingReads = 0;
+    const changing = Object.defineProperty({}, 'inspectionPredicate', {
+      get() {
+        changingReads++;
+        return changingReads === 1 ? 'network_id' : 'secret-changing-value';
+      },
+    });
+    const throwing = Object.defineProperty({}, 'inspectionPredicate', {
+      get() {
+        throwingReads++;
+        throw new Error('private getter message');
+      },
+    });
+    assert.equal(
+      reportFailure(context, 'resource_inspect', changing).inspectionPredicate,
+      'network_id',
+    );
+    assert.equal(
+      Object.hasOwn(
+        reportFailure(context, 'resource_inspect', throwing),
+        'inspectionPredicate',
+      ),
+      false,
+    );
+    assert.equal(changingReads, 1);
+    assert.equal(throwingReads, 1);
+    assert.doesNotMatch(
+      fs.readFileSync(context.manifestPath, 'utf8'),
+      /secret-changing-value|private getter message/,
     );
   });
 
