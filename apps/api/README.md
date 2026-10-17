@@ -92,6 +92,20 @@ Mock tests verify orchestration and failure propagation, not PostgreSQL rollback
 or concurrency. Isolated database proof, Redis wrapper, module registration and
 HTTP endpoints remain pending; this service is not yet exposed by the application.
 
+### Pharmacy Redis lease adapter (not registered)
+
+`PharmacyLockService` owns a pharmacy-scoped `PHARMACY_REDIS` dependency.
+`createPharmacyRedis(url)` requires an explicit URL, never discovers environment
+configuration, and does not connect eagerly. Connection and command deadlines are
+1.5 seconds, with no offline queue or automatic reconnect. Lazy connections are
+coalesced; failed attempts may be retried by the next acquisition.
+
+Acquisition uses `SET NX PX` with a ten-second lease; release compares the owner
+before deleting, and cleanup diagnostics are sanitized. Shutdown destroys only an
+opened owned client. Direct dependency-double tests verify this adapter contract,
+not a live Redis server. The dispensing facade, module/API registration and real
+Redis proof remain pending. PostgreSQL must retain correctness after lease expiry.
+
 ### Calendar-date batch expiry
 
 `isBatchExpired(expirationLabel, evaluationInstant)` is a pure policy helper.
