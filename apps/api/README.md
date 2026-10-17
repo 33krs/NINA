@@ -84,11 +84,22 @@ helper uses explicit Gregorian/Latin-numbered ICU timezone data, not server
 timezone, a fixed UTC offset, or a 24-hour duration. Clock changes may repeat
 hours or skip midnight without changing this calendar-date rule.
 
-The helper does not interpret legacy `Batch.expirationDate` timestamps, filter
-medications or stock, or persist dispensing. A future persistence adapter must
-preserve the indicated calendar label explicitly; converting a UTC-midnight
-label into Santiago time can incorrectly turn it into the previous date.
-Service integration and transactional eligibility checks remain pending.
+The expiry predicate does not interpret stored timestamps or select stock.
+`prepareEligibleBatches(batches, medicationId, evaluationInstant)` provides a pure
+allocator-input projection for the confirmed calendar-date storage convention:
+finite `Batch.expirationDate` values must encode a four-digit Gregorian date at
+UTC midnight. Their UTC label is preserved, never shifted into Santiago's previous
+date. Non-midnight, invalid and out-of-range timestamps are rejected, not repaired
+or rewritten in the database.
+
+The projection validates the evaluation instant even for empty input, medication
+identities, and every relevant batch's ID, unique ID, safe nonnegative stock and
+date encoding before filtering matching medication, positive stock and nonexpired
+dates. Records belonging to other valid medication IDs are ignored without
+examining their remaining fields. IDs are matched exactly, not trimmed or normalized.
+Results preserve input order and clone dates; `allocateStock` handles chronological
+ordering, ordinal-ID ties and insufficient-stock rejection. No stock is mutated.
+Database/service integration and transactional eligibility checks remain pending.
 
 ### Isolated PostgreSQL 15 ledger proof
 
