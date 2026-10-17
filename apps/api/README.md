@@ -130,6 +130,16 @@ rejected observations use a fixed generic error. This confirms inspected tag
 metadata association only. It does not establish publisher provenance or the
 version of a running database server, and does not execute Docker.
 
+The same module's `validateTrainingPostgresNetwork()` checks one bounded
+network-inspection object against a factory-owned recovery context. It requires
+the registered network ID/name, exact owner/run labels, an internal bridge,
+and only the expected registered container membership for the requested
+phase. The frozen result contains confirmation metadata, not resource-removal
+authority. The recovery-state read API exposes persisted proof and cleanup
+flags but not its transient finalizing flag; callers must serialize validation
+against finalization rather than treating this validator as a finalization
+lock. Synthetic tests do not prove a live daemon's inspection behavior.
+
 ## Training-account PostgreSQL SQL receipts (import-only)
 
 The assertion SQL emits one versioned, run-ID-bound text row only after each
