@@ -125,8 +125,14 @@ Rejected values are never included in guard diagnostics.
 It does not discover environment configuration, inspect Docker, import Redis or
 load the compiled adapter. Fixture tests establish guard behavior, not live Redis
 proof. A future owned orchestrator must obtain observations from the pinned local
-socket before loading any client. Actual NX/PX, Lua release, natural ten-second
-expiry/successor scenarios and disposable cleanup remain pending.
+socket before loading any client.
+
+`verify-pharmacy-redis-lease.cjs` is an import-only assertion component. It accepts
+explicit caller-owned client/service instances and a fixture key; it constructs
+no client, loads no adapter and discovers no URL or environment configuration.
+Assertions cover Redis7, NX/PX10000, owner-safe Lua, bounded natural expiry and
+successor preservation. Its dependency-double tests do not establish live Redis
+proof. The guarded child and disposable orchestration are not wired in this slice.
 
 ### Calendar-date batch expiry
 
