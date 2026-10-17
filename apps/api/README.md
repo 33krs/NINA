@@ -157,6 +157,15 @@ volume metadata. Its frozen result contains only fixed ownership and safety
 metadata; it grants no cleanup authority and does not constitute live Docker
 evidence. The caller must serialize inspection against recovery finalization.
 
+The command planner also exposes fixed `inspect_network`,
+`inspect_container`, and `server_version` operations. Resource inspection uses
+one formatted JSON object for the ownership validators. The version probe uses
+authenticated TCP to the owned container and bounds PostgreSQL statement and
+lock time; it checks the server's numeric version rather than trusting image
+metadata. `wait_ready` has both a bounded in-container retry loop and a bounded
+client timeout. These are import-only plans and tests: they do not invoke Docker
+or establish runtime isolation.
+
 ## Training-account PostgreSQL SQL receipts (import-only)
 
 The assertion SQL emits one versioned, run-ID-bound text row only after each
