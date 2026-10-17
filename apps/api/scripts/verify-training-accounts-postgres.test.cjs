@@ -474,6 +474,30 @@ describe('training account PostgreSQL recovery foundation', () => {
     );
   });
 
+  it('accepts only the fixed fixture-preparation diagnostic stages', () => {
+    const context = createContext();
+    for (const stage of [
+      'fixture_source_read',
+      'fixture_helper_load',
+      'fixture_hash',
+      'fixture_sql_build',
+      'fixture_sql_write',
+      'fixture_env_write',
+    ]) {
+      assert.equal(
+        reportFailure(context, stage, new Error('private detail')).stage,
+        stage,
+      );
+    }
+    assert.throws(() =>
+      reportFailure(
+        context,
+        'fixture_sql_execute',
+        new Error('private detail'),
+      ),
+    );
+  });
+
   it('persists creation uncertainty before invoking the operation and the exact ID before returning', async () => {
     const context = createContext();
     let beforeCall;

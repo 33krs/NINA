@@ -28,6 +28,12 @@ const MANIFEST_V1_KEYS = Object.freeze([
   'diagnostics',
 ]);
 const STAGES = new Set([
+  'fixture_source_read',
+  'fixture_helper_load',
+  'fixture_hash',
+  'fixture_sql_build',
+  'fixture_sql_write',
+  'fixture_env_write',
   'image_inspect',
   'network_create',
   'container_create',

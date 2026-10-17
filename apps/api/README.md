@@ -70,6 +70,25 @@ an empty artifact inventory and never adopt files by name. No cross-process
 concurrency guarantee is made; this lifecycle does not read environment values
 or create credentials, and its tests use synthetic content only.
 
+## Training-account PostgreSQL fixture preparation (import-only)
+
+Run `npm run build --workspace=@nina/api` before importing
+`scripts/training-accounts-postgres-fixture.cjs`; it loads the compiled password
+hasher, not TypeScript source. Preparation reads only the fixed account migration
+and compiled helper. `readTrainingAccountMigration()` exposes the same bounded,
+canonical-file-validated migration read without accepting a caller-supplied path.
+The compiled helper executes from its validated source bytes with only its
+`node:buffer` and `node:crypto` dependencies, rather than resolving through the
+module cache. Preparation generates separate random synthetic account and database
+credentials, and writes bounded SQL and PostgreSQL environment content through
+the private recovery API. Its frozen result contains only generated names,
+private artifact paths, and fixed assertion metadata. It does not start
+PostgreSQL or Docker and never reads ambient environment configuration.
+
+Scrypt work cannot be cancelled once started. Callers must await fixture
+preparation to settle before beginning resource reconciliation or finalization;
+this import-only helper does not establish cross-process concurrency safety.
+
 Run the ordinary API checks with `npm --workspace @nina/api test` and
 `npm --workspace @nina/api run lint`.
 
@@ -359,12 +378,3 @@ This proves migration constraints, not cross-medication/prescription matching,
 expiry eligibility, service transactions, concurrency or administrator resistance.
 The existing deterministic helper tests and offline Prisma checks remain useful;
 run the isolated command before claiming live database proof.
-
-## Fixed training-account migration reader
-
-`scripts/training-accounts-postgres-fixture.cjs` exposes an import-only
-`readTrainingAccountMigration()` helper. It reads only the fixed, bounded
-training-account migration after canonical-path, regular-file, no-link,
-identity, and UTF-8 checks; it accepts no caller-selected path and performs no
-process, environment, database, or service work. Its synthetic filesystem tests
-do not establish PostgreSQL runtime behavior.
