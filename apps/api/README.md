@@ -66,8 +66,8 @@ copied into the metadata-only recovery manifest. The manifest records intent
 before file creation and the created file's device/inode before content is
 written; ambiguous writes, legacy unregistered files, replacements, links, or
 foreign inventory retain recovery evidence. Version-one manifests reopen with
-an empty artifact inventory and never adopt files by name. Successful proof and cleanup intentionally retain artifacts until the separate
-identity-checked disposal unit lands. No cross-process concurrency guarantee is made; this lifecycle does not read environment values
+an empty artifact inventory and never adopt files by name. No cross-process
+concurrency guarantee is made; this lifecycle does not read environment values
 or create credentials, and its tests use synthetic content only.
 
 Run the ordinary API checks with `npm --workspace @nina/api test` and

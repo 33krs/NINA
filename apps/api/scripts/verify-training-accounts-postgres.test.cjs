@@ -957,23 +957,90 @@ describe('training account PostgreSQL recovery foundation', () => {
     assert.equal(fs.existsSync(path.join(context.root, 'postgres.env')), true);
   });
 
-  it('retains completed artifacts until inventory-checked disposal is integrated', async () => {
+  it('validates the full private inventory before its first unlink', async () => {
     const context = createContext();
     const world = await captureOwnedPair(context);
     writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    const foreignPath = path.join(context.root, 'foreign.bin');
+    fs.writeFileSync(foreignPath, 'foreign', { mode: 0o600, flag: 'wx' });
+    const originalUnlink = fs.unlinkSync;
+    let unlinks = 0;
+    fs.unlinkSync = (...args) => {
+      unlinks++;
+      return originalUnlink(...args);
+    };
+    let result;
+    try {
+      result = await finalizeRecovery(context, {
+        execute: world.execute,
+        proofSucceeded: true,
+      });
+    } finally {
+      fs.unlinkSync = originalUnlink;
+    }
+    assert.equal(unlinks, 0);
+    assert.equal(result.passed, false);
+    assert.equal(result.recoveryRetained, true);
+    assert.equal(fs.existsSync(context.manifestPath), true);
+    assert.equal(fs.existsSync(path.join(context.root, 'proof.sql')), true);
+    assert.equal(fs.existsSync(foreignPath), true);
+  });
+
+  it('refuses to dispose an artifact replaced by a symlink or hard link', async () => {
+    for (const replacement of ['symlink', 'hardlink']) {
+      const context = createContext();
+      const world = await captureOwnedPair(context);
+      writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+      const artifact = path.join(context.root, 'proof.sql');
+      const outside = path.join(
+        path.dirname(context.root),
+        `${replacement}.bin`,
+      );
+      fs.writeFileSync(outside, 'foreign replacement', {
+        mode: 0o600,
+        flag: 'wx',
+      });
+      fs.unlinkSync(artifact);
+      if (replacement === 'symlink') fs.symlinkSync(outside, artifact);
+      else fs.linkSync(outside, artifact);
+
+      const result = await finalizeRecovery(context, {
+        execute: world.execute,
+        proofSucceeded: true,
+      });
+      assert.equal(result.passed, false);
+      assert.equal(result.recoveryRetained, true);
+      assert.equal(fs.existsSync(context.manifestPath), true);
+      assert.equal(fs.readFileSync(outside, 'utf8'), 'foreign replacement');
+    }
+  });
+
+  it('refuses a same-name replacement with a different file identity', async () => {
+    const context = createContext();
+    const world = await captureOwnedPair(context);
+    writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    const artifact = path.join(context.root, 'proof.sql');
+    fs.unlinkSync(artifact);
+    fs.writeFileSync(artifact, 'foreign replacement', {
+      mode: 0o600,
+      flag: 'wx',
+    });
+
     const result = await finalizeRecovery(context, {
       execute: world.execute,
       proofSucceeded: true,
     });
     assert.equal(result.passed, false);
-    assert.equal(result.cleanupConfirmed, true);
     assert.equal(result.recoveryRetained, true);
-    assert.equal(fs.existsSync(path.join(context.root, 'proof.sql')), true);
+    assert.equal(fs.readFileSync(artifact, 'utf8'), 'foreign replacement');
+    assert.equal(fs.existsSync(context.manifestPath), true);
   });
 
   it('passes and disposes private evidence only after proof success and confirmed cleanup', async () => {
     const context = createContext();
     const world = await captureOwnedPair(context);
+    writePrivateArtifact(context, 'proof_sql', 'SELECT 1;');
+    writePrivateArtifact(context, 'postgres_env', 'PGHOST=127.0.0.1\n');
     const result = await finalizeRecovery(context, {
       execute: world.execute,
       proofSucceeded: true,
