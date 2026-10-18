@@ -67,6 +67,8 @@ function subprocessEnvironment({
     HOME: home,
     TMPDIR: home,
     DATABASE_URL: databaseUrl,
+    PRISMA_GENERATE_SKIP_AUTOINSTALL: '1',
+    CHECKPOINT_DISABLE: '1',
     NINA_ODONTOGRAM_PG15_RUN_ID: runId,
     NINA_ODONTOGRAM_PG15_PROOF_FILE: proofFile,
     NINA_ODONTOGRAM_PG15_TESTS: '1',
@@ -193,7 +195,67 @@ async function assertMissing(inspect, message) {
   assert.equal(await inspectOptional(inspect), undefined, message);
 }
 
+function parseSuite(args) {
+  if (args.length === 0) return 'odontogram';
+  if (args.length === 1 && args[0] === '--suite=pharmacy-ledger')
+    return 'pharmacy-ledger';
+  if (args.length === 1 && args[0] === '--suite=pharmacy-dispensing')
+    return 'pharmacy-dispensing';
+  throw new Error(
+    'Unsupported arguments: use no arguments, --suite=pharmacy-ledger or --suite=pharmacy-dispensing',
+  );
+}
+
+function writePostgresEnvironment(root, database, user, password) {
+  const file = path.join(root, 'postgres.env');
+  fs.writeFileSync(
+    file,
+    [
+      `POSTGRES_DB=${database}`,
+      `POSTGRES_USER=${user}`,
+      `POSTGRES_PASSWORD=${password}`,
+      'POSTGRES_HOST_AUTH_METHOD=scram-sha-256',
+      'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256',
+      `PGPASSWORD=${password}`,
+      '',
+    ].join('\n'),
+    { mode: 0o600, flag: 'wx' },
+  );
+  return file;
+}
+
+function redact(value, secrets = []) {
+  return secrets
+    .filter(Boolean)
+    .sort((a, b) => b.length - a.length)
+    .reduce(
+      (text, secret) => text.split(secret).join('[REDACTED]'),
+      String(value),
+    );
+}
+
+function stdoutPreservationOption(options) {
+  let value;
+  try {
+    value = options?.preserveStdout;
+  } catch {
+    throw new Error('Invalid stdout preservation option');
+  }
+  if (value !== undefined && typeof value !== 'boolean')
+    throw new Error('Invalid stdout preservation option');
+  return value === true;
+}
+
 async function run(command, args, options = {}) {
+  const preserveStdout = stdoutPreservationOption(options);
+  const stage = options.stage;
+  if (
+    stage !== undefined &&
+    !['prisma-generate', 'migrate-predecessors', 'migrate-history'].includes(
+      stage,
+    )
+  )
+    throw new Error('Unknown diagnostic stage');
   options.guard?.();
   options.signal?.throwIfAborted();
   const timeout =
@@ -203,6 +265,7 @@ async function run(command, args, options = {}) {
     Number.isInteger(timeout) && timeout > 0,
     'subprocess timeout must be finite and positive',
   );
+  if (stage) console.log(`PG15_STAGE_STARTED ${stage}`);
   const result = await new Promise((resolve) => {
     // A dedicated process group lets cancellation stop only this command's descendants.
     const grouped = process.platform !== 'win32';
@@ -278,21 +341,29 @@ async function run(command, args, options = {}) {
     if (options.signal?.aborted) abort();
   });
   options.guard?.();
-  if (result.error) {
-    result.error.status = result.status;
-    result.error.stderr = result.stderr || '';
-    throw result.error;
-  }
-  if (result.status !== 0) {
+  result.stderr = redact(result.stderr || '', options.redactions);
+  if (result.error || result.status !== 0) {
+    // Never forward raw spawn errors: their message/path/spawnargs may contain secrets.
     const error = new Error(
-      `${path.basename(command)} exited ${result.status}: ${(result.stderr || '').trim()}`,
+      redact(
+        result.error?.message ??
+          `${path.basename(command)} exited ${result.status}: ${result.stderr.trim()}`,
+        options.redactions,
+      ),
     );
+    error.code = result.error?.code;
+    error.killed = result.error?.killed;
     error.status = result.status;
-    error.stderr = result.stderr || '';
+    error.stderr = result.stderr;
+    if (stage) {
+      error.stage = stage;
+      console.log(`PG15_STAGE_FAILED ${stage}`);
+    }
     throw error;
   }
   options.guard?.();
-  return (result.stdout || '').trim();
+  if (stage) console.log(`PG15_STAGE_PASSED ${stage}`);
+  return preserveStdout ? result.stdout : (result.stdout || '').trim();
 }
 
 function docker(args, options = {}) {
@@ -434,6 +505,40 @@ async function waitForPublishedPort(
 }
 
 function prepareIsolatedClient(schemaPath, tempRoot) {
+  const root = fs.realpathSync(tempRoot);
+  const stats = fs.lstatSync(tempRoot);
+  if (
+    !stats.isDirectory() ||
+    (stats.mode & 0o077) !== 0 ||
+    !fs.realpathSync(schemaPath).startsWith(root + path.sep)
+  )
+    throw new Error('Prisma generation requires private temporary storage');
+  const apiRoot = path.resolve(__dirname, '..');
+  const packageFile = require.resolve('@prisma/client/package.json', {
+    paths: [apiRoot],
+  });
+  const installed = fs.realpathSync(path.dirname(packageFile));
+  const localRoots = [
+    path.join(apiRoot, 'node_modules'),
+    path.resolve(apiRoot, '../../node_modules'),
+  ];
+  if (
+    !localRoots.some(
+      (local) =>
+        path.dirname(packageFile).startsWith(local + path.sep) &&
+        installed.startsWith(local + path.sep),
+    ) ||
+    JSON.parse(fs.readFileSync(packageFile, 'utf8')).name !== '@prisma/client'
+  )
+    throw new Error(
+      'Prisma client must resolve from installed local dependencies',
+    );
+  // The copied schema cannot resolve project packages from its temporary ancestry.
+  // Link only this installed package; never let generation auto-install dependencies.
+  const modules = path.join(root, 'node_modules');
+  fs.mkdirSync(modules, { mode: 0o700 });
+  fs.mkdirSync(path.join(modules, '@prisma'), { mode: 0o700 });
+  fs.symlinkSync(installed, path.join(modules, '@prisma', 'client'), 'dir');
   let schema = fs.readFileSync(schemaPath, 'utf8');
   let found = false;
   schema = schema.replace(
@@ -457,7 +562,12 @@ function prepareIsolatedClient(schemaPath, tempRoot) {
   return clientPath;
 }
 
-function copyMigrationStage(apiRoot, tempRoot, includeHistory) {
+function copyMigrationStage(
+  apiRoot,
+  tempRoot,
+  includeHistory,
+  suite = 'odontogram',
+) {
   const source = path.join(apiRoot, 'prisma');
   const target = path.join(tempRoot, 'prisma');
   fs.mkdirSync(path.join(target, 'migrations'), { recursive: true });
@@ -471,7 +581,11 @@ function copyMigrationStage(apiRoot, tempRoot, includeHistory) {
   );
   for (const name of fs.readdirSync(path.join(source, 'migrations')).sort()) {
     if (name === 'migration_lock.toml') continue;
-    if (!includeHistory && name.includes('add_odontogram_history')) continue;
+    const omitted =
+      suite !== 'odontogram'
+        ? '20261010140000_add_prescription_dispensing'
+        : '20261010130000_add_odontogram_history';
+    if (!includeHistory && name === omitted) continue;
     fs.cpSync(
       path.join(source, 'migrations', name),
       path.join(target, 'migrations', name),
@@ -479,6 +593,10 @@ function copyMigrationStage(apiRoot, tempRoot, includeHistory) {
     );
   }
   return path.join(target, 'schema.prisma');
+}
+
+function proofAuth(suite) {
+  return suite !== 'odontogram' ? 'isolated-scram' : 'isolated-trust';
 }
 
 function assertProof(proof) {
@@ -491,6 +609,9 @@ function assertProof(proof) {
 }
 
 async function main() {
+  const suite = parseSuite(process.argv.slice(2));
+  const dispensing = suite === 'pharmacy-dispensing';
+  const pharmacy = suite !== 'odontogram';
   const apiRoot = path.resolve(__dirname, '..');
   const runId = crypto.randomUUID();
   const name = `nina-odontogram-pg15-${runId.slice(0, 12)}`;
@@ -500,7 +621,20 @@ async function main() {
   const proofFile = path.join(tempRoot, 'container-proof.json');
   const database = `nina_${runId.replaceAll('-', '').slice(0, 16)}`;
   const user = `nina_${runId.replaceAll('-', '').slice(16, 28)}`;
-  const url = `postgresql://${user}@127.0.0.1:`;
+  const password = pharmacy ? crypto.randomBytes(32).toString('hex') : '';
+  const redactions = [password];
+  const url = `postgresql://${user}${pharmacy ? ':' + password : ''}@127.0.0.1:`;
+  const authArgs = pharmacy
+    ? ['--env-file', path.join(tempRoot, 'postgres.env')]
+    : [
+        '--env',
+        `POSTGRES_DB=${database}`,
+        '--env',
+        `POSTGRES_USER=${user}`,
+        '--env',
+        'POSTGRES_HOST_AUTH_METHOD=trust',
+      ];
+  const psqlAuth = pharmacy ? ['-h', '127.0.0.1'] : [];
   let networkId;
   let containerId;
   let imageId;
@@ -513,14 +647,19 @@ async function main() {
   };
   const cancellation = createCancellation();
   const guard = cancellation.throwIfCancelled;
-  const commandOptions = { home: tempRoot, guard, signal: cancellation.signal };
+  const commandOptions = {
+    home: tempRoot,
+    guard,
+    signal: cancellation.signal,
+    redactions,
+  };
   let passed = false;
 
   const cleanup = async () => {
     let outcome = { containerId, networkId };
     try {
       outcome = await reconcileOwnedResources({
-        docker: (args) => docker(args, { home: tempRoot }),
+        docker: (args) => docker(args, { home: tempRoot, redactions }),
         runId,
         name,
         containerId,
@@ -532,7 +671,7 @@ async function main() {
       networkId = outcome.networkId;
     } catch (error) {
       cleanupFailure = error;
-      console.error(`CLEANUP_FAILED ${error.message}`);
+      console.error(`CLEANUP_FAILED ${redact(error.message, redactions)}`);
     }
     fs.rmSync(tempRoot, { recursive: true, force: true });
     const complete = !cleanupFailure;
@@ -548,6 +687,7 @@ async function main() {
   process.on('SIGTERM', signalHandler);
 
   try {
+    if (pharmacy) writePostgresEnvironment(tempRoot, database, user, password);
     imageId = await docker(
       ['image', 'inspect', '--format', '{{.Id}}', IMAGE],
       commandOptions,
@@ -592,12 +732,7 @@ async function main() {
             '/var/lib/postgresql/data:rw,noexec,nosuid,size=256m',
             '--publish',
             `127.0.0.1:${port}:5432`,
-            '--env',
-            `POSTGRES_DB=${database}`,
-            '--env',
-            `POSTGRES_USER=${user}`,
-            '--env',
-            'POSTGRES_HOST_AUTH_METHOD=trust',
+            ...authArgs,
             '--label',
             `${OWNER_LABEL}=${OWNER_VALUE}`,
             '--label',
@@ -613,6 +748,16 @@ async function main() {
       await docker(['inspect', containerId], commandOptions),
     )[0];
     assert.equal(details.Id, containerId);
+    if (pharmacy) {
+      for (const entry of [
+        'POSTGRES_HOST_AUTH_METHOD=scram-sha-256',
+        'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256',
+        `POSTGRES_PASSWORD=${password}`,
+      ]) {
+        if (!details.Config.Env?.includes(entry))
+          throw new Error('Owned SCRAM authentication configuration mismatch');
+      }
+    }
     assert.equal(details.Config.Image, IMAGE);
     assert.equal(details.Config.Labels?.[OWNER_LABEL], OWNER_VALUE);
     assert.equal(details.Config.Labels?.[RUN_LABEL], runId);
@@ -665,6 +810,7 @@ async function main() {
     assert.equal(network.Labels?.[RUN_LABEL], runId);
     assert.deepEqual(Object.keys(network.Containers ?? {}), [containerId]);
     const proof = {
+      suite,
       owner: OWNER_VALUE,
       runId,
       containerId,
@@ -678,7 +824,7 @@ async function main() {
       publishedPort: port,
       database,
       user,
-      auth: 'isolated-trust',
+      auth: pharmacy ? 'isolated-scram' : 'isolated-trust',
       baselinePatient: crypto.randomUUID(),
       baselineOdontogram: crypto.randomUUID(),
       baselineTime: '2026-01-02T03:04:05.678Z',
@@ -687,7 +833,7 @@ async function main() {
         intact: true,
       }),
     };
-    assertProof(proof);
+    if (!pharmacy) assertProof(proof);
     fs.writeFileSync(proofFile, JSON.stringify(proof), {
       mode: 0o600,
       flag: 'wx',
@@ -707,6 +853,7 @@ async function main() {
         'exec',
         containerId,
         'psql',
+        ...psqlAuth,
         '-At',
         '-U',
         user,
@@ -723,16 +870,21 @@ async function main() {
       'the actual server major version must be PostgreSQL 15',
     );
 
+    const databaseUrl = `${url}${port}/${database}?schema=public`;
+    redactions.push(databaseUrl);
     const isolatedEnv = subprocessEnvironment({
       path: process.env.PATH,
       home: tempRoot,
-      databaseUrl: `${url}${port}/${database}?schema=public`,
+      databaseUrl,
       runId,
       proofFile,
     });
-    const schema = copyMigrationStage(apiRoot, tempRoot, false);
-    const isolatedClientPath = prepareIsolatedClient(schema, tempRoot);
-    isolatedEnv.NINA_ODONTOGRAM_PG15_PRISMA_CLIENT = isolatedClientPath;
+    const schema = copyMigrationStage(apiRoot, tempRoot, false, suite);
+    if (!pharmacy || dispensing)
+      isolatedEnv.NINA_ODONTOGRAM_PG15_PRISMA_CLIENT = prepareIsolatedClient(
+        schema,
+        tempRoot,
+      );
     const prismaCli = path.join(
       apiRoot,
       'node_modules',
@@ -740,26 +892,38 @@ async function main() {
       'build',
       'index.js',
     );
-    const migrate = () =>
+    const migrate = (stage) =>
       run(
         process.execPath,
         [prismaCli, 'migrate', 'deploy', '--schema', schema],
-        { cwd: tempRoot, env: isolatedEnv, guard, signal: cancellation.signal },
+        {
+          cwd: tempRoot,
+          env: isolatedEnv,
+          guard,
+          signal: cancellation.signal,
+          redactions,
+          stage,
+        },
       );
-    await run(process.execPath, [prismaCli, 'generate', '--schema', schema], {
-      cwd: tempRoot,
-      env: isolatedEnv,
-      timeout: timeoutFor('prisma'),
-      guard,
-      signal: cancellation.signal,
-    });
-    await migrate();
+    if (!pharmacy || dispensing)
+      await run(process.execPath, [prismaCli, 'generate', '--schema', schema], {
+        cwd: tempRoot,
+        env: isolatedEnv,
+        timeout: timeoutFor('prisma'),
+        stage: 'prisma-generate',
+        guard,
+        signal: cancellation.signal,
+        redactions,
+      });
+    await migrate('migrate-predecessors');
     const psql = (sql) =>
       docker(
         [
           'exec',
           containerId,
           'psql',
+          ...psqlAuth,
+          '-At',
           '-v',
           'ON_ERROR_STOP=1',
           '-U',
@@ -771,6 +935,46 @@ async function main() {
         ],
         commandOptions,
       );
+    if (pharmacy) {
+      assert.equal(
+        await psql(
+          "SELECT bool_and(auth_method = 'scram-sha-256') FROM pg_hba_file_rules WHERE type = 'host'",
+        ),
+        't',
+        'all host authentication rules must use SCRAM',
+      );
+      if (dispensing) {
+        copyMigrationStage(apiRoot, tempRoot, true, suite);
+        await migrate('migrate-history');
+        const output = await run(
+          process.execPath,
+          [path.join(__dirname, 'verify-pharmacy-dispensing.cjs')],
+          {
+            ...commandOptions,
+            cwd: tempRoot,
+            env: { ...isolatedEnv, NINA_PHARMACY_DISPENSING_PG15: '1' },
+            timeout: timeoutFor('jest'),
+          },
+        );
+        assert.equal(
+          output,
+          'PHARMACY_SERVICE_BASELINE_PASSED deliveries=3 expiry_rejections=1',
+        );
+        console.log(output);
+        passed = true;
+        return;
+      }
+      const {
+        seedLegacy,
+        verifyLedger,
+      } = require('./verify-pharmacy-ledger.cjs');
+      const snapshot = await seedLegacy(psql);
+      copyMigrationStage(apiRoot, tempRoot, true, suite);
+      await migrate();
+      await verifyLedger(psql, snapshot);
+      passed = true;
+      return;
+    }
     await psql(
       `INSERT INTO "Patient" ("id","rut","firstName","lastName","dateOfBirth","updatedAt") VALUES ('${proof.baselinePatient}','synthetic-${proof.baselinePatient}','Synthetic','Verification','1990-01-01 00:00:00','2026-01-02 03:04:05.678')`,
     );
@@ -778,7 +982,7 @@ async function main() {
       `INSERT INTO "Odontogram" ("id","patientId","teethStates","updatedAt") VALUES ('${proof.baselineOdontogram}','${proof.baselinePatient}','${proof.baselineJson}'::jsonb,'2026-01-02 03:04:05.678')`,
     );
     copyMigrationStage(apiRoot, tempRoot, true);
-    await migrate();
+    await migrate('migrate-history');
 
     const jestPackage = path.dirname(
       path.dirname(require.resolve('jest', { paths: [apiRoot] })),
@@ -817,14 +1021,14 @@ async function main() {
     );
     passed = true;
   } catch (error) {
-    console.error(`PG15_SUITE_FAILED ${error.message}`);
+    console.error(`PG15_SUITE_FAILED ${redact(error.message, redactions)}`);
     process.exitCode = 1;
   } finally {
     try {
       await cleanup();
     } catch (error) {
       cleanupFailure = error;
-      console.error(`CLEANUP_FAILED ${error.message}`);
+      console.error(`CLEANUP_FAILED ${redact(error.message, redactions)}`);
       process.exitCode = 1;
     }
     process.removeListener('SIGINT', signalHandler);
@@ -833,7 +1037,7 @@ async function main() {
     if (cleanupFailure) process.exitCode = 1;
     if (passed && !cleanupFailure && !cancellation.exitCode) {
       console.log(
-        `PG15_SUITE_PASSED server=${serverVersion} image=${IMAGE} image_id=${imageId} container_id=${containerId} network_id=${networkId} port=127.0.0.1:${port} auth=isolated-trust network=dedicated storage=tmpfs`,
+        `PG15_SUITE_PASSED server=${serverVersion} image=${IMAGE} image_id=${imageId} container_id=${containerId} network_id=${networkId} port=127.0.0.1:${port} auth=${proofAuth(suite)} network=dedicated storage=tmpfs`,
       );
     }
   }
@@ -847,6 +1051,10 @@ if (require.main === module) {
 }
 
 module.exports = {
+  prepareIsolatedClient,
+  parseSuite,
+  writePostgresEnvironment,
+  copyMigrationStage,
   createCancellation,
   createPossiblyOwned,
   dockerArgs,
