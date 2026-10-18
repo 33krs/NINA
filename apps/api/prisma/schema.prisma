@@ -14,14 +14,42 @@ enum UserRole {
 }
 
 model User {
-  id           String   @id @default(uuid()) @db.Uuid
-  username     String   @unique @db.VarChar(32)
+  id           String        @id @default(uuid()) @db.Uuid
+  username     String        @unique @db.VarChar(32)
   passwordHash String
   role         UserRole
-  isActive     Boolean  @default(true)
-  authVersion  Int      @default(0)
-  createdAt    DateTime @default(now()) @db.Timestamp(3)
-  updatedAt    DateTime @updatedAt @db.Timestamp(3)
+  isActive     Boolean       @default(true)
+  authVersion  Int           @default(0)
+  createdAt    DateTime      @default(now()) @db.Timestamp(3)
+  updatedAt    DateTime      @updatedAt @db.Timestamp(3)
+  sessions     AuthSession[]
+}
+
+model AuthSession {
+  id            String         @id @default(uuid()) @db.Uuid
+  userId        String         @db.Uuid
+  user          User           @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  authVersion   Int
+  createdAt     DateTime       @default(now()) @db.Timestamptz(3)
+  expiresAt     DateTime       @db.Timestamptz(3)
+  revokedAt     DateTime?      @db.Timestamptz(3)
+  refreshTokens RefreshToken[]
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model RefreshToken {
+  id         String      @id @default(uuid()) @db.Uuid
+  sessionId  String      @db.Uuid
+  session    AuthSession @relation(fields: [sessionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  tokenHash  String      @unique @db.VarChar(64)
+  createdAt  DateTime    @default(now()) @db.Timestamptz(3)
+  expiresAt  DateTime    @db.Timestamptz(3)
+  consumedAt DateTime?   @db.Timestamptz(3)
+
+  @@index([sessionId])
+  @@index([expiresAt])
 }
 
 // ==========================================

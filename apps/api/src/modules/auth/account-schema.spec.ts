@@ -13,7 +13,7 @@ const migration = readFileSync(
 );
 
 describe('training account schema foundation', () => {
-  it('defines only explicit account roles and an unconnected user model', () => {
+  it('defines explicit account roles and only the auth-session account relation', () => {
     expect(schema).toMatch(
       /enum UserRole\s*\{\s*ADMIN\s+INSTRUCTOR\s+STUDENT\s*\}/,
     );
@@ -27,7 +27,22 @@ describe('training account schema foundation', () => {
     expect(userModel).toMatch(/authVersion\s+Int\s+@default\(0\)/);
     expect(userModel).toMatch(/createdAt\s+DateTime\s+@default\(now\(\)\)/);
     expect(userModel).toMatch(/updatedAt\s+DateTime\s+@updatedAt/);
+    expect(userModel).toMatch(/^\s*sessions\s+AuthSession\[\]\s*$/m);
     expect(userModel).not.toMatch(/Patient|professionalId|@relation/);
+    // Exact fields prevent another implicit relation from bypassing this guard.
+    expect(
+      [...userModel!.matchAll(/^\s*(\w+)\s+\w+/gm)].map((match) => match[1]),
+    ).toEqual([
+      'id',
+      'username',
+      'passwordHash',
+      'role',
+      'isActive',
+      'authVersion',
+      'createdAt',
+      'updatedAt',
+      'sessions',
+    ]);
   });
 
   it('adds database-enforced canonical username and nonnegative auth-version checks without seeds', () => {
