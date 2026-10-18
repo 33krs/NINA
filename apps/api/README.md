@@ -62,6 +62,34 @@ fail-closed authentication and resource authorization remain future work. Tests
 use mocked Prisma, synthetic inputs, and actual password-helper composition
 without starting the application or connecting to a database.
 
+## Session persistence foundation (not registered or exposed)
+
+The additive `AuthSession` and `RefreshToken` schema records account-bound
+sessions, issued `authVersion`, explicit expiration, session revocation and
+refresh-token consumption. Each token row stores only a unique canonical
+64-character lowercase SHA-256 digest, with SQL C-collation and format checks;
+no raw token or password is copied. Separate retained token rows support future
+replay detection, but rotation and replay protection are not implemented.
+Restrictive foreign keys prevent deleting or reassigning referenced accounts
+and sessions while dependent rows remain. No clinical identity is linked.
+
+New session/token timestamps use `TIMESTAMPTZ(3)` (Prisma `Timestamptz(3)`),
+representing instants independently of the database session's display time zone.
+SQL requires finite creation/expiration times, expiration after creation, and
+nullable revocation/consumption times that are finite and not before creation.
+No expiration duration, idle timeout or absolute reauthentication policy is
+selected. A future trusted service must enforce token/session expiration
+binding, current account activity/version and atomic lifecycle transitions;
+row checks alone do not establish those cross-row or authorization invariants.
+
+This migration has not been applied to an existing application database. Offline
+schema/SQL assertions and Prisma validation/generation are not PostgreSQL runtime
+or concurrency proof. No lifecycle service, token issuance, route, guard, module
+registration, account or browser persistence is added. Remembered login across
+browser closure remains future integration, not a promise of perpetual access.
+Global fail-closed authentication and resource authorization remain required
+before protected API or dispensing exposure.
+
 ## Training-account PostgreSQL assertion SQL (import-only)
 
 `scripts/training-accounts-postgres-sql.cjs` builds a bounded transaction that
