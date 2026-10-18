@@ -31,9 +31,36 @@ lowercase ASCII; accepted names are 3–32 characters using letters, digits,
 periods, underscores, or hyphens, and must start with a letter or digit. The
 additive migration enforces the canonical form and nonnegative `authVersion`
 with SQL checks that Prisma's schema DSL cannot represent. It has not been
-applied to any database. No account rows, default credentials, or administrator
-are seeded. `authVersion` is only groundwork for future revocation; no session
-or authentication behavior is implemented here.
+deployed to an existing application database; isolated PostgreSQL15 proof is
+separate from deployment. No account rows, default credentials, or administrator
+are seeded. `authVersion` is groundwork for future revocation, not an implemented
+session or ongoing authentication check.
+
+## Internal credential authentication (not registered or exposed)
+
+`CredentialAuthenticationService.authenticate(username, password)` composes the
+existing canonical username and bounded scrypt helpers with a narrowly selected
+Prisma account lookup. Only an active account with matching credentials returns
+a fresh `{ id, username, role, authVersion }` snapshot. Password/hash material,
+clinical identity, and resource permissions are never returned or inferred.
+
+All rejected credentials, missing/inactive accounts, and caught database or
+verifier errors return `null`; supplied material and underlying errors are not
+logged or propagated. Inactive accounts still use their stored password hash.
+Missing accounts use a lazy per-service random nonaccount hash through the same
+bounded helpers, shared across concurrent preparations and retried on a later
+call if preparation fails. Even a dummy match cannot authenticate a missing
+account. The first missing-account request includes hash preparation; malformed
+inputs/hashes and infrastructure failures may take different paths. This does
+not promise equal response timing, request throttling, or an HTTP error policy.
+
+This service is deliberately unregistered: no route, global guard, token,
+account, secret configuration, or session policy is added. The identity snapshot
+is not a session and does not establish ongoing account activity or revocation
+checks. It does not activate authentication or grant clinical access; global
+fail-closed authentication and resource authorization remain future work. Tests
+use mocked Prisma, synthetic inputs, and actual password-helper composition
+without starting the application or connecting to a database.
 
 ## Training-account PostgreSQL assertion SQL (import-only)
 
