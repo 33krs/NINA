@@ -107,11 +107,32 @@ committed, including when expiration passes during commit.
 Transaction wait/execution bounds are infrastructure limits, not session lifetime
 policy. No default expiration or forced-reauthentication policy is selected.
 Tests use typed dependency doubles and a controlled clock; they do not prove live
-PostgreSQL rollback, races or isolation. Online validation and owner-scoped
-revocation are deferred to the next slice; there is no ongoing activity/version
-check or logout integration here. Refresh consumption, rotation/replay handling,
-JWT verification, HTTP/cookie transport, global guards and account-security
-operations that advance `authVersion` also remain future work.
+PostgreSQL rollback, races or isolation. Creation alone does not establish an
+ongoing check or logout integration; the internal collaborator below provides
+validation without exposing it through the application.
+Refresh consumption, rotation/replay handling, JWT verification, HTTP/cookie
+transport, global guards and account-security operations that advance
+`authVersion` remain future work.
+
+## Internal session validation (not registered or exposed)
+
+`SessionService.validate(sessionId, ownerId, authVersion)` expects access claims
+already verified by a future authenticating caller; these identifiers are not
+bearer credentials. Canonical lowercase UUIDs and an integer version in
+`0..2147483647` are required before database access. A bounded repeatable-read
+snapshot checks owner/account binding, both stored versions, current activity,
+revocation and finite creation/expiration boundaries. After transaction
+settlement, expiration is rechecked before returning the minimal current database
+identity (not claimed roles or clinical permissions); denials and caught errors
+return `null` without retry. The snapshot does not guarantee latest-at-return
+revocation visibility or retroactively cancel in-flight work.
+
+Owner-scoped revocation is deferred to RLS2-B2 after validation is integrated;
+there is no revoke method or public logout integration in this slice. Validation
+performs no writes. Transaction bounds are infrastructure limits, not a selected
+lifetime policy. Typed dependency doubles and a controlled clock cover these
+internal boundaries, not live PostgreSQL rollback, races or isolation. No routes,
+module registration, JWT verification, cookies or frontend persistence are added.
 
 ## Training-account PostgreSQL assertion SQL (import-only)
 
