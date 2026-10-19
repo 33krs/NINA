@@ -33,8 +33,8 @@ additive migration enforces the canonical form and nonnegative `authVersion`
 with SQL checks that Prisma's schema DSL cannot represent. It has not been
 deployed to an existing application database; isolated PostgreSQL15 proof is
 separate from deployment. No account rows, default credentials, or administrator
-are seeded. `authVersion` is groundwork for future revocation, not an implemented
-session or ongoing authentication check.
+are seeded. `authVersion` does not activate authentication by itself; the
+unregistered creation service below rechecks the credential snapshot only.
 
 ## Internal credential authentication (not registered or exposed)
 
@@ -78,17 +78,40 @@ representing instants independently of the database session's display time zone.
 SQL requires finite creation/expiration times, expiration after creation, and
 nullable revocation/consumption times that are finite and not before creation.
 No expiration duration, idle timeout or absolute reauthentication policy is
-selected. A future trusted service must enforce token/session expiration
-binding, current account activity/version and atomic lifecycle transitions;
-row checks alone do not establish those cross-row or authorization invariants.
+selected. Row checks alone do not establish cross-row or authorization
+invariants; the internal creation service below binds initial token/session
+expiry and rechecks account activity/version when issuing them.
 
 This migration has not been applied to an existing application database. Offline
 schema/SQL assertions and Prisma validation/generation are not PostgreSQL runtime
-or concurrency proof. No lifecycle service, token issuance, route, guard, module
-registration, account or browser persistence is added. Remembered login across
-browser closure remains future integration, not a promise of perpetual access.
+or concurrency proof. No route, guard, module registration, account or browser
+persistence is added. Remembered login across browser closure remains future
+integration, not a promise of perpetual access.
 Global fail-closed authentication and resource authorization remain required
 before protected API or dispensing exposure.
+
+## Internal session creation (not registered or exposed)
+
+`SessionCreationService.create(username, password, expiresAt)` composes credential
+verification with a bounded serializable transaction. It accepts only a
+caller-provided finite future `Date`, snapshots it before awaiting credentials,
+and rechecks account activity, `authVersion` and expiration before writing. The
+session and its initial refresh row share explicit creation/expiration timestamps
+and are created atomically. A fresh 32-byte CSPRNG credential is persisted only
+as its lowercase SHA-256 digest; raw refresh material and a minimal current
+account identity are returned only after successful commit and a final expiry
+check. Rejection or caught dependency/transaction/commit failure returns `null`
+without retry or exposing details. A failure response does not prove no row was
+committed, including when expiration passes during commit.
+
+Transaction wait/execution bounds are infrastructure limits, not session lifetime
+policy. No default expiration or forced-reauthentication policy is selected.
+Tests use typed dependency doubles and a controlled clock; they do not prove live
+PostgreSQL rollback, races or isolation. Online validation and owner-scoped
+revocation are deferred to the next slice; there is no ongoing activity/version
+check or logout integration here. Refresh consumption, rotation/replay handling,
+JWT verification, HTTP/cookie transport, global guards and account-security
+operations that advance `authVersion` also remain future work.
 
 ## Training-account PostgreSQL assertion SQL (import-only)
 
