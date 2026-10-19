@@ -72,6 +72,32 @@ export class SessionService {
     }
   }
 
+  async revoke(sessionId: unknown, ownerId: unknown): Promise<boolean> {
+    if (!this.isId(sessionId) || !this.isId(ownerId)) return false;
+    try {
+      return await this.prisma.$transaction(async (tx) => {
+        const session = await tx.authSession.findUnique({
+          where: { id: sessionId },
+          select: { userId: true, createdAt: true, revokedAt: true },
+        });
+        if (!session || session.userId !== ownerId) return false;
+        if (session.revokedAt !== null) return true;
+        const createdAt = session.createdAt.getTime();
+        if (!Number.isFinite(createdAt)) return false;
+        // Preserve timestamp ordering when the wall clock moves backward.
+        const revokedAt = new Date(Math.max(Date.now(), createdAt));
+        const updated = await tx.authSession.updateMany({
+          where: { id: sessionId, userId: ownerId, revokedAt: null },
+          data: { revokedAt },
+        });
+        return updated.count === 1;
+      }, TRANSACTION_OPTIONS);
+    } catch {
+      // False does not establish whether a database commit occurred.
+      return false;
+    }
+  }
+
   private isId(value: unknown): value is string {
     return (
       typeof value === 'string' &&
