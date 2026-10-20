@@ -235,3 +235,180 @@ describe('unregistered session validation', () => {
     },
   );
 });
+
+describe('unregistered owner-scoped session revocation', () => {
+  const saved: Pick<SessionRow, 'userId' | 'createdAt' | 'revokedAt'> = {
+    userId: owner,
+    createdAt: new Date(now.getTime() - 1000),
+    revokedAt: null,
+  };
+  const tx = {
+    authSession: {
+      findUnique: jest.fn<(query: unknown) => Promise<typeof saved | null>>(),
+      updateMany: jest.fn<(query: unknown) => Promise<{ count: number }>>(),
+    },
+  };
+  const prisma = {
+    $transaction:
+      jest.fn<
+        (
+          callback: (client: typeof tx) => Promise<boolean>,
+          options: unknown,
+        ) => Promise<boolean>
+      >(),
+  };
+  let service: SessionService;
+
+  beforeEach(() => {
+    jest.resetAllMocks();
+    jest.useFakeTimers().setSystemTime(now);
+    tx.authSession.findUnique.mockResolvedValue(saved);
+    tx.authSession.updateMany.mockResolvedValue({ count: 1 });
+    prisma.$transaction.mockImplementation(async (callback) => callback(tx));
+    service = new SessionService(prisma as unknown as PrismaService);
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('conditionally revokes only the owned session and preserves the first timestamp on repeat', async () => {
+    await expect(service.revoke(id, owner)).resolves.toBe(true);
+    expect(prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      options,
+    );
+    expect(tx.authSession.findUnique).toHaveBeenCalledWith({
+      where: { id },
+      select: { userId: true, createdAt: true, revokedAt: true },
+    });
+    expect(tx.authSession.updateMany).toHaveBeenCalledWith({
+      where: { id, userId: owner, revokedAt: null },
+      data: { revokedAt: now },
+    });
+    tx.authSession.findUnique.mockResolvedValue({ ...saved, revokedAt: now });
+    jest.setSystemTime(expiry);
+    await expect(service.revoke(id, owner)).resolves.toBe(true);
+    expect(tx.authSession.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([undefined, null, '', id.toUpperCase(), `${id}\n`, 1])(
+    'rejects malformed session or owner ID before database access: %p',
+    async (malformed) => {
+      await expect(service.revoke(malformed, owner)).resolves.toBe(false);
+      await expect(service.revoke(id, malformed)).resolves.toBe(false);
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    null,
+    { ...saved, userId: other },
+    { ...saved, userId: other, revokedAt: now },
+  ])(
+    'does not write or confirm missing/foreign sessions, including revoked rows',
+    async (row) => {
+      tx.authSession.findUnique.mockResolvedValue(row);
+      await expect(service.revoke(id, owner)).resolves.toBe(false);
+      expect(tx.authSession.updateMany).not.toHaveBeenCalled();
+    },
+  );
+
+  it('confirms an already-revoked owned session without rewriting its timestamp', async () => {
+    tx.authSession.findUnique.mockResolvedValue({ ...saved, revokedAt: now });
+    await expect(service.revoke(id, owner)).resolves.toBe(true);
+    expect(tx.authSession.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('clamps the timestamp to creation if the wall clock moves backward', async () => {
+    jest.setSystemTime(new Date(saved.createdAt.getTime() - 1000));
+    await expect(service.revoke(id, owner)).resolves.toBe(true);
+    expect(tx.authSession.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { revokedAt: saved.createdAt } }),
+    );
+  });
+
+  it('denies malformed persisted creation without attempting a write', async () => {
+    tx.authSession.findUnique.mockResolvedValue({
+      ...saved,
+      createdAt: new Date(NaN),
+    });
+    await expect(service.revoke(id, owner)).resolves.toBe(false);
+    expect(tx.authSession.updateMany).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 2])(
+    'denies a conditional update count of %p without retry',
+    async (count) => {
+      tx.authSession.updateMany.mockResolvedValue({ count });
+      await expect(service.revoke(id, owner)).resolves.toBe(false);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(tx.authSession.updateMany).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['lookup', 'write', 'transaction', 'commit'])(
+    'denies %s errors without retry or diagnostic disclosure',
+    async (dependency) => {
+      const diagnostics = [
+        jest.spyOn(globalThis.console, 'log'),
+        jest.spyOn(globalThis.console, 'warn'),
+        jest.spyOn(globalThis.console, 'error'),
+      ];
+      const error = new Error('synthetic private diagnostic');
+      if (dependency === 'lookup')
+        tx.authSession.findUnique.mockRejectedValue(error);
+      if (dependency === 'write')
+        tx.authSession.updateMany.mockRejectedValue(error);
+      if (dependency === 'transaction')
+        prisma.$transaction.mockRejectedValue(error);
+      if (dependency === 'commit')
+        prisma.$transaction.mockImplementation(async (callback) => {
+          await callback(tx);
+          throw error;
+        });
+      await expect(service.revoke(id, owner)).resolves.toBe(false);
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(tx.authSession.findUnique.mock.calls.length).toBeLessThanOrEqual(
+        1,
+      );
+      expect(tx.authSession.updateMany.mock.calls.length).toBeLessThanOrEqual(
+        1,
+      );
+      if (dependency === 'commit')
+        expect(tx.authSession.updateMany).toHaveBeenCalledTimes(1);
+      for (const diagnostic of diagnostics)
+        expect(diagnostic).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([null, now])(
+    'waits for commit before confirming revocation state %p',
+    async (revokedAt) => {
+      tx.authSession.findUnique.mockResolvedValue({ ...saved, revokedAt });
+      let release!: () => void;
+      let entered!: () => void;
+      const committed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const callbackFinished = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      prisma.$transaction.mockImplementation(async (callback) => {
+        const result = await callback(tx);
+        entered();
+        await committed;
+        return result;
+      });
+      let resolved = false;
+      const pending = service.revoke(id, owner).then((result) => {
+        resolved = true;
+        return result;
+      });
+      await Promise.race([callbackFinished, pending]);
+      expect(resolved).toBe(false);
+      release();
+      await expect(pending).resolves.toBe(true);
+    },
+  );
+});

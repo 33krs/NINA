@@ -127,12 +127,31 @@ identity (not claimed roles or clinical permissions); denials and caught errors
 return `null` without retry. The snapshot does not guarantee latest-at-return
 revocation visibility or retroactively cancel in-flight work.
 
-Owner-scoped revocation is deferred to RLS2-B2 after validation is integrated;
-there is no revoke method or public logout integration in this slice. Validation
-performs no writes. Transaction bounds are infrastructure limits, not a selected
-lifetime policy. Typed dependency doubles and a controlled clock cover these
-internal boundaries, not live PostgreSQL rollback, races or isolation. No routes,
-module registration, JWT verification, cookies or frontend persistence are added.
+Validation performs no writes. Transaction bounds are infrastructure limits,
+not a selected lifetime policy. Typed dependency doubles and a controlled clock
+cover these internal boundaries, not live PostgreSQL rollback, races or isolation.
+No routes, module registration, JWT verification, cookies or frontend persistence
+are added.
+
+## Internal owner-scoped session revocation (not registered or exposed)
+
+`SessionService.revoke(sessionId, ownerId)` also requires a future caller that
+already verified its access credential; identifiers alone are not bearer
+credentials. Malformed IDs are rejected before database work. A bounded
+repeatable-read transaction reads only owner, creation and revocation fields;
+missing or foreign sessions return `false`, even if already revoked. Owned
+already-revoked sessions return `true` without timestamp rewriting. Otherwise a
+conditional owner/session/unrevoked update records a timestamp no earlier than
+finite creation, including when the wall clock moves backward. Refresh rows and
+clinical permissions are untouched.
+
+Success requires an already-revoked owned session or exactly one conditional
+update, and is returned only after transaction settlement. Zero writes and
+caught lookup/write/transaction/commit failures return `false` without diagnostics
+or retry; false does not establish whether a commit occurred. No public logout,
+in-flight cancellation guarantee, session lifetime policy or transport is added.
+Isolated typed revocation doubles preserve validation's no-write tests; these
+checks do not prove live PostgreSQL rollback, concurrency or isolation.
 
 ## Training-account PostgreSQL assertion SQL (import-only)
 
