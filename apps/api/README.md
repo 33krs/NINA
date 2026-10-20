@@ -110,8 +110,8 @@ Tests use typed dependency doubles and a controlled clock; they do not prove liv
 PostgreSQL rollback, races or isolation. Creation alone does not establish an
 ongoing check or logout integration; the internal collaborator below provides
 validation without exposing it through the application.
-Refresh consumption, rotation/replay handling, JWT verification, HTTP/cookie
-transport, global guards and account-security operations that advance
+Refresh rotation is internal-only as described below; JWT verification,
+HTTP/cookie transport, global guards and account-security operations that advance
 `authVersion` remain future work.
 
 ## Internal session validation (not registered or exposed)
@@ -152,6 +152,32 @@ or retry; false does not establish whether a commit occurred. No public logout,
 in-flight cancellation guarantee, session lifetime policy or transport is added.
 Isolated typed revocation doubles preserve validation's no-write tests; these
 checks do not prove live PostgreSQL rollback, concurrency or isolation.
+
+## Internal refresh rotation (not registered or exposed)
+
+`RefreshRotationService.rotate(refreshToken)` accepts only canonical 32-byte
+base64url material compatible with initial issuance. Its SHA-256 digest locates
+the persisted credential. A bounded serializable transaction verifies token,
+session/owner/account linkage, current activity/version, revocation, finite
+creation/expiration ordering and exact token/session expiry binding. It
+conditionally consumes one unconsumed row and creates one fresh digest-only
+successor in the same session, retaining the existing expiration without a new
+duration or extension. Old rows remain. Raw successor material and minimal current
+identity are returned only after transaction settlement and a final expiry check.
+
+For controlled nonpublic testers, consumed-token reuse **denies without automatic
+session, family or account revocation**. Missing/invalid credentials, conditional
+losers, serialization conflicts and caught dependency/commit failures return
+`null`, without diagnostics, grace, stale acceptance or automatic retry. Raw input
+and successor material are never persisted or logged. An ambiguous commit or lost
+response may leave the client without its successor even while its session stays
+valid: null does not prove no commit, and lost-response recovery or uninterrupted
+access is not promised. No account/session revocation or version write occurs.
+
+The service remains unregistered: no HTTP/JWT/cookie transport, browser storage,
+public login, lifetime policy or production rollout is activated. Controlled clock,
+randomness and typed transaction doubles test these boundaries; they do not prove
+live PostgreSQL rollback, races or serializable isolation.
 
 ## Training-account PostgreSQL assertion SQL (import-only)
 
