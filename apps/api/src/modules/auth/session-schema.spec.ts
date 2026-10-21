@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { cwd } from 'node:process';
 import { describe, expect, it } from '@jest/globals';
@@ -11,6 +12,14 @@ const migration = readFileSync(
   ),
   'utf8',
 );
+const nullableMigrationPath = resolve(
+  cwd(),
+  'prisma/migrations/20261021200000_allow_nonexpiring_auth_sessions/migration.sql',
+);
+// Missing implementation must fail assertions, not prevent the suite loading.
+const nullableMigration = existsSync(nullableMigrationPath)
+  ? readFileSync(nullableMigrationPath, 'utf8')
+  : '';
 
 function model(name: string): string {
   const body = schema.match(
@@ -62,13 +71,13 @@ describe('unexposed session persistence foundation', () => {
     ['AuthSession', 'revokedAt'],
     ['RefreshToken', 'consumedAt'],
   ])(
-    'requires explicit UTC-aware expiry and optional lifecycle time in %s',
+    'permits nullable UTC-aware expiry without defaults in %s',
     (name, terminalTime) => {
       const body = model(name);
       expect(body).toMatch(
         /createdAt\s+DateTime\s+@default\(now\(\)\)\s+@db\.Timestamptz\(3\)/,
       );
-      expect(body).toMatch(/expiresAt\s+DateTime\s+@db\.Timestamptz\(3\)/);
+      expect(body).toMatch(/expiresAt\s+DateTime\?\s+@db\.Timestamptz\(3\)/);
       expect(body).toMatch(
         new RegExp(
           `${terminalTime}\\s+DateTime\\?\\s+@db\\.Timestamptz\\(3\\)`,
@@ -109,7 +118,7 @@ describe('unexposed session persistence foundation', () => {
     ['AuthSession', 'revokedAt'],
     ['RefreshToken', 'consumedAt'],
   ])(
-    'enforces finite consistent %s timestamps without a duration policy',
+    'retains the historical finite %s timestamp constraints',
     (name, terminalTime) => {
       const body = table(name);
       expect(body).toContain(
@@ -151,5 +160,55 @@ describe('unexposed session persistence foundation', () => {
       /\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER)\s+(INTO|FROM|TABLE|TYPE)\b/i,
     );
     expect(migration).not.toMatch(/password|rawToken|Patient|professionalId/);
+  });
+
+  it('preserves the original session migration byte-for-byte', () => {
+    expect(createHash('sha256').update(migration).digest('hex')).toBe(
+      '6dace84f8a54015f60fb18abd6f007ecb44d40f0784f1587cceae9e3bace5344',
+    );
+  });
+
+  it.each(['AuthSession', 'RefreshToken'])(
+    'adds explicit null expiry while retaining finite creation and ordered finite expiry for %s',
+    (name) => {
+      const sql = nullableMigration.replace(/\s+/g, ' ');
+      expect(sql).toContain('ALTER TABLE "' + name + '"');
+      expect(sql).toContain('ALTER COLUMN "expiresAt" DROP NOT NULL');
+      expect(sql).toContain('DROP CONSTRAINT "' + name + '_lifetime_check"');
+      expect(sql).toContain(
+        'ADD CONSTRAINT "' +
+          name +
+          '_lifetime_check" CHECK (' +
+          'isfinite("createdAt") AND ("expiresAt" IS NULL OR ' +
+          '(isfinite("expiresAt") AND "expiresAt" > "createdAt")))',
+      );
+    },
+  );
+
+  it('alters only the two expiry requirements and named lifetime checks without rewriting rows', () => {
+    const statements = nullableMigration
+      .replace(/--[^\n]*/g, '')
+      .split(';')
+      .map((statement) => statement.trim().replace(/\s+/g, ' '))
+      .filter(Boolean);
+    expect(statements).toEqual(
+      ['AuthSession', 'RefreshToken'].map(
+        (name) =>
+          'ALTER TABLE "' +
+          name +
+          '" ' +
+          'ALTER COLUMN "expiresAt" DROP NOT NULL, ' +
+          'DROP CONSTRAINT "' +
+          name +
+          '_lifetime_check", ' +
+          'ADD CONSTRAINT "' +
+          name +
+          '_lifetime_check" CHECK (' +
+          'isfinite("createdAt") AND ("expiresAt" IS NULL OR ' +
+          '(isfinite("expiresAt") AND "expiresAt" > "createdAt")))',
+      ),
+    );
+    // Exact statement matching excludes data changes, defaults, FK/index or
+    // lifecycle changes, infinity sentinels, and unrelated table alterations.
   });
 });

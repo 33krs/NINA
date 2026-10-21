@@ -65,30 +65,46 @@ without starting the application or connecting to a database.
 ## Session persistence foundation (not registered or exposed)
 
 The additive `AuthSession` and `RefreshToken` schema records account-bound
-sessions, issued `authVersion`, explicit expiration, session revocation and
+sessions, issued `authVersion`, nullable expiration, session revocation and
 refresh-token consumption. Each token row stores only a unique canonical
 64-character lowercase SHA-256 digest, with SQL C-collation and format checks;
 no raw token or password is copied. Separate retained token rows support future
-replay detection, but rotation and replay protection are not implemented.
+replay analysis; the internal rotation contract is described below.
 Restrictive foreign keys prevent deleting or reassigning referenced accounts
 and sessions while dependent rows remain. No clinical identity is linked.
 
 New session/token timestamps use `TIMESTAMPTZ(3)` (Prisma `Timestamptz(3)`),
 representing instants independently of the database session's display time zone.
-SQL requires finite creation/expiration times, expiration after creation, and
-nullable revocation/consumption times that are finite and not before creation.
-No expiration duration, idle timeout or absolute reauthentication policy is
-selected. Row checks alone do not establish cross-row or authorization
-invariants; the internal creation service below binds initial token/session
-expiry and rechecks account activity/version when issuing them.
+The original migration requires finite creation/expiration times and expiration
+after creation. The follow-up
+`20261021200000_allow_nonexpiring_auth_sessions` migration permits explicit null
+expiry in both tables while retaining finite creation and ordered finite expiry
+for existing rows. Revocation/consumption remain nullable, finite when present,
+and not before creation. Only the expiry nullability and named lifetime checks
+change: no data backfill, defaults, foreign-key/index changes or infinity
+sentinels are introduced. Existing finite values are not rewritten.
 
-This migration has not been applied to an existing application database. Offline
+For controlled nonpublic student practice, the selected backend outcome is no
+time/inactivity-based forced login, with voluntary logout and security/account
+revocation retained. This slice supplies persistence capability only: existing
+creation still requires finite expiry, and validation/rotation can deny null
+until the ordered follow-up service changes land. Undefined or malformed expiry
+is not an implicit nonexpiring credential. Row checks do not establish cross-row
+null/finite expiry matching; service changes must preserve that binding and all
+account checks. Repository `strictNullChecks: false` means a passing API build
+does not prove runtime null support.
+
+These migrations have not been applied to an existing application database. Offline
 schema/SQL assertions and Prisma validation/generation are not PostgreSQL runtime
 or concurrency proof. No route, guard, module registration, account or browser
 persistence is added. Remembered login across browser closure remains future
 integration, not a promise of perpetual access.
 Global fail-closed authentication and resource authorization remain required
 before protected API or dispensing exposure.
+
+Rollback before deployment is limited to this persistence unit. After null rows
+exist, restoring NOT NULL requires a separate migration/data decision; no row
+rewriting, deletion, or automatic database downgrade is authorized here.
 
 ## Internal session creation (not registered or exposed)
 

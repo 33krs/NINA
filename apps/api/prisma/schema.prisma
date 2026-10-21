@@ -31,7 +31,7 @@ model AuthSession {
   user          User           @relation(fields: [userId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   authVersion   Int
   createdAt     DateTime       @default(now()) @db.Timestamptz(3)
-  expiresAt     DateTime       @db.Timestamptz(3)
+  expiresAt     DateTime?      @db.Timestamptz(3)
   revokedAt     DateTime?      @db.Timestamptz(3)
   refreshTokens RefreshToken[]
 
@@ -45,7 +45,7 @@ model RefreshToken {
   session    AuthSession @relation(fields: [sessionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
   tokenHash  String      @unique @db.VarChar(64)
   createdAt  DateTime    @default(now()) @db.Timestamptz(3)
-  expiresAt  DateTime    @db.Timestamptz(3)
+  expiresAt  DateTime?   @db.Timestamptz(3)
   consumedAt DateTime?   @db.Timestamptz(3)
 
   @@index([sessionId])
