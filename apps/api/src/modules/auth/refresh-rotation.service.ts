@@ -40,7 +40,7 @@ const TRANSACTION_OPTIONS = {
 export interface RotatedSession {
   readonly id: string;
   readonly account: AuthenticatedAccount;
-  readonly expiresAt: Date;
+  readonly expiresAt: Date | null;
   readonly refreshToken: string;
 }
 
@@ -59,6 +59,7 @@ export class RefreshRotationService {
       )
         return null;
       const tokenHash = createHash('sha256').update(refreshToken).digest('hex');
+      let capturedExpiry: number | null = null;
       const result = await this.prisma.$transaction(async (tx) => {
         const token = await tx.refreshToken.findUnique({
           where: { tokenHash },
@@ -69,8 +70,18 @@ export class RefreshRotationService {
         const account = session.user;
         const createdAt = token.createdAt.getTime();
         const sessionCreatedAt = session.createdAt.getTime();
-        const expiresAt = token.expiresAt.getTime();
-        const sessionExpiresAt = session.expiresAt.getTime();
+        const expiresAt =
+          token.expiresAt === null
+            ? null
+            : token.expiresAt instanceof Date
+              ? token.expiresAt.getTime()
+              : NaN;
+        const sessionExpiresAt =
+          session.expiresAt === null
+            ? null
+            : session.expiresAt instanceof Date
+              ? session.expiresAt.getTime()
+              : NaN;
         const rotatedAt = new Date();
         if (
           token.sessionId !== session.id ||
@@ -81,16 +92,16 @@ export class RefreshRotationService {
           session.authVersion < 0 ||
           session.authVersion > 2147483647 ||
           session.authVersion !== account.authVersion ||
-          ![createdAt, sessionCreatedAt, expiresAt, sessionExpiresAt].every(
-            Number.isFinite,
-          ) ||
+          ![createdAt, sessionCreatedAt].every(Number.isFinite) ||
           createdAt < sessionCreatedAt ||
           createdAt > rotatedAt.getTime() ||
-          expiresAt <= rotatedAt.getTime() ||
-          expiresAt !== sessionExpiresAt
+          expiresAt !== sessionExpiresAt ||
+          (expiresAt !== null &&
+            (!Number.isFinite(expiresAt) || expiresAt <= rotatedAt.getTime()))
         )
           return null;
 
+        capturedExpiry = expiresAt;
         const successor = randomBytes(32).toString('base64url');
         const successorHash = createHash('sha256')
           .update(successor)
@@ -107,7 +118,7 @@ export class RefreshRotationService {
             sessionId: session.id,
             tokenHash: successorHash,
             createdAt: rotatedAt,
-            expiresAt: new Date(expiresAt),
+            expiresAt: expiresAt === null ? null : new Date(expiresAt),
           },
           select: { id: true },
         });
@@ -119,11 +130,13 @@ export class RefreshRotationService {
             role: account.role,
             authVersion: account.authVersion,
           },
-          expiresAt: new Date(expiresAt),
+          expiresAt: expiresAt === null ? null : new Date(expiresAt),
           refreshToken: successor,
         };
       }, TRANSACTION_OPTIONS);
-      return result && result.expiresAt.getTime() > Date.now() ? result : null;
+      return result && (capturedExpiry === null || capturedExpiry > Date.now())
+        ? result
+        : null;
     } catch {
       // No retry/recovery or automatic revocation after an uncertain commit.
       return null;

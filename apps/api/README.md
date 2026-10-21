@@ -86,9 +86,8 @@ sentinels are introduced. Existing finite values are not rewritten.
 
 For controlled nonpublic student practice, the selected backend outcome is no
 time/inactivity-based forced login, with voluntary logout and security/account
-revocation retained. This slice supplies persistence capability only: existing
-creation and rotation still require finite expiry; internal validation now
-supports explicit null as described below. Undefined or malformed expiry
+revocation retained. Persistence, internal validation and internal rotation support explicit null
+expiry as described below; creation still requires finite expiry. Undefined or malformed expiry
 is not an implicit nonexpiring credential. Row checks do not establish cross-row
 null/finite expiry matching; service changes must preserve that binding and all
 account checks. Repository `strictNullChecks: false` means a passing API build
@@ -151,9 +150,8 @@ errors return `null` without retry or diagnostics. The snapshot does not guarant
 latest-at-return revocation visibility or retroactively cancel in-flight work.
 
 Validation performs no writes. Owner-scoped revocation remains unchanged and
-works independently of expiry, including owned null-expiry sessions. Creation
-and refresh rotation remain finite-only until their follow-up changes; this unit
-does not issue nonexpiring sessions. Typed dependency doubles and a controlled
+works independently of expiry, including owned null-expiry sessions. Creation remains finite-only until its follow-up change; validation and rotation
+do not issue initial nonexpiring sessions. Typed dependency doubles and a controlled
 clock cover internal boundaries, not live PostgreSQL rollback, races or isolation.
 No routes, module registration, JWT verification, cookies, frontend persistence,
 or public logout button are added.
@@ -184,11 +182,19 @@ checks do not prove live PostgreSQL rollback, concurrency or isolation.
 base64url material compatible with initial issuance. Its SHA-256 digest locates
 the persisted credential. A bounded serializable transaction verifies token,
 session/owner/account linkage, current activity/version, revocation, finite
-creation/expiration ordering and exact token/session expiry binding. It
-conditionally consumes one unconsumed row and creates one fresh digest-only
+creation ordering and exact token/session expiry binding. Expiry must be paired
+explicit `null` values (no time-based expiration), or actual valid finite future
+`Date` values representing the same instant. Mixed null/finite, missing,
+undefined, malformed, invalid or unequal expiries deny before writes; Date-like
+objects are not accepted. It conditionally consumes one unconsumed row and creates one fresh digest-only
 successor in the same session, retaining the existing expiration without a new
 duration or extension. Old rows remain. Raw successor material and minimal current
-identity are returned only after transaction settlement and a final expiry check.
+identity are returned only after transaction settlement. Successor persistence
+and the result retain exact null, or independent Dates cloned from the captured
+finite instant. After settlement, the captured finite expiry is rechecked even
+if Date objects have mutated; null survives clock advancement. Creation remains
+finite-only until the separate issuance change, and no null session is issued by
+this internal rotation contract.
 
 For controlled nonpublic testers, consumed-token reuse **denies without automatic
 session, family or account revocation**. Missing/invalid credentials, conditional
