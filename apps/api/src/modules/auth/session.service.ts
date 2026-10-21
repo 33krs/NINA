@@ -47,7 +47,13 @@ export class SessionService {
         });
         if (!session) return null;
         const createdAt = session.createdAt.getTime();
-        const expiresAt = session.expiresAt.getTime();
+        const expiration = session.expiresAt;
+        const expiresAt =
+          expiration === null
+            ? null
+            : expiration instanceof Date
+              ? expiration.getTime()
+              : NaN;
         const now = Date.now();
         if (
           session.userId !== ownerId ||
@@ -57,14 +63,15 @@ export class SessionService {
           session.user.isActive !== true ||
           session.revokedAt !== null ||
           !Number.isFinite(createdAt) ||
-          !Number.isFinite(expiresAt) ||
           createdAt > now ||
-          expiresAt <= now
+          (expiresAt !== null &&
+            (!Number.isFinite(expiresAt) || expiresAt <= now))
         )
           return null;
         return { account: this.identity(session.user), expiresAt };
       }, TRANSACTION_OPTIONS);
-      return snapshot && snapshot.expiresAt > Date.now()
+      return snapshot &&
+        (snapshot.expiresAt === null || snapshot.expiresAt > Date.now())
         ? snapshot.account
         : null;
     } catch {

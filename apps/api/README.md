@@ -87,8 +87,8 @@ sentinels are introduced. Existing finite values are not rewritten.
 For controlled nonpublic student practice, the selected backend outcome is no
 time/inactivity-based forced login, with voluntary logout and security/account
 revocation retained. This slice supplies persistence capability only: existing
-creation still requires finite expiry, and validation/rotation can deny null
-until the ordered follow-up service changes land. Undefined or malformed expiry
+creation and rotation still require finite expiry; internal validation now
+supports explicit null as described below. Undefined or malformed expiry
 is not an implicit nonexpiring credential. Row checks do not establish cross-row
 null/finite expiry matching; service changes must preserve that binding and all
 account checks. Repository `strictNullChecks: false` means a passing API build
@@ -121,7 +121,8 @@ without retry or exposing details. A failure response does not prove no row was
 committed, including when expiration passes during commit.
 
 Transaction wait/execution bounds are infrastructure limits, not session lifetime
-policy. No default expiration or forced-reauthentication policy is selected.
+policy. This creation service still requires explicit finite expiry; nonexpiring
+issuance remains a follow-up to the selected no-time-expiry practice policy.
 Tests use typed dependency doubles and a controlled clock; they do not prove live
 PostgreSQL rollback, races or isolation. Creation alone does not establish an
 ongoing check or logout integration; the internal collaborator below provides
@@ -137,17 +138,25 @@ already verified by a future authenticating caller; these identifiers are not
 bearer credentials. Canonical lowercase UUIDs and an integer version in
 `0..2147483647` are required before database access. A bounded repeatable-read
 snapshot checks owner/account binding, both stored versions, current activity,
-revocation and finite creation/expiration boundaries. After transaction
-settlement, expiration is rechecked before returning the minimal current database
-identity (not claimed roles or clinical permissions); denials and caught errors
-return `null` without retry. The snapshot does not guarantee latest-at-return
-revocation visibility or retroactively cancel in-flight work.
+revocation and finite creation no later than the current time. Expiry must be
+exactly `null` (no time-based expiration) or an actual valid, finite, unexpired
+`Date`; undefined, wrong types, invalid dates and Date-like objects are rejected.
+Null expiry does not bypass any account, ownership or security check.
 
-Validation performs no writes. Transaction bounds are infrastructure limits,
-not a selected lifetime policy. Typed dependency doubles and a controlled clock
-cover these internal boundaries, not live PostgreSQL rollback, races or isolation.
-No routes, module registration, JWT verification, cookies or frontend persistence
-are added.
+Finite expiry is captured numerically inside the transaction and rechecked after
+awaited settlement; null remains nonexpiring across clock advancement. The
+returned identity contains only minimal current database fields, not claimed
+roles or clinical permissions. Denials and caught lookup/transaction/commit
+errors return `null` without retry or diagnostics. The snapshot does not guarantee
+latest-at-return revocation visibility or retroactively cancel in-flight work.
+
+Validation performs no writes. Owner-scoped revocation remains unchanged and
+works independently of expiry, including owned null-expiry sessions. Creation
+and refresh rotation remain finite-only until their follow-up changes; this unit
+does not issue nonexpiring sessions. Typed dependency doubles and a controlled
+clock cover internal boundaries, not live PostgreSQL rollback, races or isolation.
+No routes, module registration, JWT verification, cookies, frontend persistence,
+or public logout button are added.
 
 ## Internal owner-scoped session revocation (not registered or exposed)
 

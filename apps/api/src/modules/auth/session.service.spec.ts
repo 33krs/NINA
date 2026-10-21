@@ -28,7 +28,7 @@ interface SessionRow {
   userId: string;
   authVersion: number;
   createdAt: Date;
-  expiresAt: Date;
+  expiresAt: Date | null;
   revokedAt: Date | null;
   user: typeof currentAccount;
 }
@@ -52,11 +52,22 @@ const options = {
 };
 
 describe('unregistered session validation', () => {
+  const forbiddenWrite = jest.fn<() => never>(() => {
+    throw new Error('Unexpected validation write');
+  });
+  const forbiddenWrites = {
+    create: forbiddenWrite,
+    update: forbiddenWrite,
+    delete: forbiddenWrite,
+    deleteMany: forbiddenWrite,
+  };
   const tx = {
     authSession: {
+      ...forbiddenWrites,
       findUnique: jest.fn<(query: unknown) => Promise<SessionRow | null>>(),
       updateMany: jest.fn<(query: unknown) => Promise<{ count: number }>>(),
     },
+    user: { ...forbiddenWrites, updateMany: forbiddenWrite },
   };
   const prisma = {
     $transaction:
@@ -76,10 +87,18 @@ describe('unregistered session validation', () => {
     tx.authSession.updateMany.mockResolvedValue({ count: 1 });
     prisma.$transaction.mockImplementation(async (callback) => callback(tx));
     service = new SessionService(prisma as unknown as PrismaService);
+    jest.spyOn(globalThis.console, 'log');
+    jest.spyOn(globalThis.console, 'warn');
+    jest.spyOn(globalThis.console, 'error');
   });
   afterEach(() => {
     jest.useRealTimers();
     expect(tx.authSession.updateMany).not.toHaveBeenCalled();
+    expect(forbiddenWrite).not.toHaveBeenCalled();
+    expect(globalThis.console.log).not.toHaveBeenCalled();
+    expect(globalThis.console.warn).not.toHaveBeenCalled();
+    expect(globalThis.console.error).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
   });
 
   it('validates in a consistent bounded snapshot and returns current role, not issued privileges', async () => {
@@ -113,6 +132,20 @@ describe('unregistered session validation', () => {
         },
       },
     });
+  });
+
+  it('validates an explicit null expiry and returns only the current account identity', async () => {
+    const account = { ...currentAccount, role: UserRole.ADMIN };
+    tx.authSession.findUnique.mockResolvedValue(
+      session({ expiresAt: null, user: account }),
+    );
+    const result = await service.validate(id, owner, 2);
+    expect(result).toEqual({ ...identity, role: UserRole.ADMIN });
+    expect(result).not.toBe(account);
+    expect(prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      options,
+    );
   });
 
   it.each([
@@ -163,6 +196,64 @@ describe('unregistered session validation', () => {
     await expect(service.validate(id, owner, 2)).resolves.toBeNull();
   });
 
+  it.each(
+    denied.filter(
+      ([name]) =>
+        !['expiry boundary', 'expired', 'invalid expiry'].includes(name),
+    ),
+  )('retains %s denial when expiry is null', async (_name, saved) => {
+    tx.authSession.findUnique.mockResolvedValue(
+      saved ? { ...saved, expiresAt: null } : null,
+    );
+    await expect(service.validate(id, owner, 2)).resolves.toBeNull();
+  });
+
+  it.each([
+    undefined,
+    false,
+    true,
+    0,
+    1,
+    NaN,
+    Infinity,
+    expiry.toISOString(),
+    {},
+    [],
+    { getTime: () => expiry.getTime() },
+  ])(
+    'rejects malformed persisted expiry rather than treating it as null: %p',
+    async (value) => {
+      tx.authSession.findUnique.mockResolvedValue(
+        session({ expiresAt: value as unknown as Date }),
+      );
+      await expect(service.validate(id, owner, 2)).resolves.toBeNull();
+    },
+  );
+
+  it('does not apply time-based expiry to null during transaction settlement', async () => {
+    tx.authSession.findUnique.mockResolvedValue(session({ expiresAt: null }));
+    prisma.$transaction.mockImplementation(async (callback) => {
+      const result = await callback(tx);
+      jest.setSystemTime(new Date(expiry.getTime() + 1));
+      return result;
+    });
+    await expect(service.validate(id, owner, 2)).resolves.toEqual(identity);
+  });
+
+  it('rechecks a numeric finite snapshot even if the row Date changes during commit', async () => {
+    const mutableExpiry = new Date(expiry);
+    tx.authSession.findUnique.mockResolvedValue(
+      session({ expiresAt: mutableExpiry }),
+    );
+    prisma.$transaction.mockImplementation(async (callback) => {
+      const result = await callback(tx);
+      mutableExpiry.setTime(expiry.getTime() + 1000);
+      jest.setSystemTime(expiry);
+      return result;
+    });
+    await expect(service.validate(id, owner, 2)).resolves.toBeNull();
+  });
+
   it('denies validation when expiration passes during transaction settlement', async () => {
     prisma.$transaction.mockImplementation(async (callback) => {
       const result = await callback(tx);
@@ -176,6 +267,15 @@ describe('unregistered session validation', () => {
   const operations = [
     {
       name: 'validation',
+      expiresAt: expiry,
+      invoke: () => service.validate(id, owner, 2),
+      success: identity,
+      denied: null,
+      failures: ['lookup', 'transaction', 'commit'],
+    },
+    {
+      name: 'nonexpiring validation',
+      expiresAt: null,
       invoke: () => service.validate(id, owner, 2),
       success: identity,
       denied: null,
@@ -184,7 +284,11 @@ describe('unregistered session validation', () => {
   ];
   describe.each(operations)(
     '$name transaction settlement',
-    ({ invoke, success, denied, failures }) => {
+    ({ expiresAt, invoke, success, denied, failures }) => {
+      beforeEach(() => {
+        tx.authSession.findUnique.mockResolvedValue(session({ expiresAt }));
+      });
+
       it('awaits commit before confirming success', async () => {
         let release!: () => void;
         let entered!: () => void;
@@ -290,6 +394,27 @@ describe('unregistered owner-scoped session revocation', () => {
     jest.setSystemTime(expiry);
     await expect(service.revoke(id, owner)).resolves.toBe(true);
     expect(tx.authSession.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('revokes an owned null-expiry session without selecting or modifying expiry', async () => {
+    const nonexpiring = { ...saved, expiresAt: null };
+    tx.authSession.findUnique.mockResolvedValue(nonexpiring);
+    await expect(service.revoke(id, owner)).resolves.toBe(true);
+    expect(tx.authSession.findUnique).toHaveBeenCalledWith({
+      where: { id },
+      select: { userId: true, createdAt: true, revokedAt: true },
+    });
+    expect(tx.authSession.updateMany).toHaveBeenCalledWith({
+      where: { id, userId: owner, revokedAt: null },
+      data: { revokedAt: now },
+    });
+    tx.authSession.findUnique.mockResolvedValue({
+      ...nonexpiring,
+      revokedAt: now,
+    });
+    await expect(service.revoke(id, owner)).resolves.toBe(true);
+    expect(tx.authSession.updateMany).toHaveBeenCalledTimes(1);
+    expect(nonexpiring.expiresAt).toBeNull();
   });
 
   it.each([undefined, null, '', id.toUpperCase(), `${id}\n`, 1])(
