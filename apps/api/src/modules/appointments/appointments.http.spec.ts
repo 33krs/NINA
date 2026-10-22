@@ -12,10 +12,11 @@ import { Prisma, type Appointment } from '@prisma/client';
 import { type AddressInfo } from 'node:net';
 import { AppModule } from '../../app.module';
 import { PrismaService } from '../../prisma/prisma.service';
+import { AccessBoundaryGuard } from '../auth/access-boundary.guard';
 
 const { fetch } = globalThis;
 
-describe('appointment reservations over HTTP (dependency doubles)', () => {
+describe('appointment HTTP behavior (dependency doubles; access boundary overridden)', () => {
   const input = {
     patientId: '3dfc6dbf-c6f9-478b-b7dc-ff6d9a622137',
     professionalId: 'professional-1',
@@ -90,6 +91,8 @@ describe('appointment reservations over HTTP (dependency doubles)', () => {
     }));
     prisma.$transaction.mockImplementation(async (fn) => fn(transaction));
     const module = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(AccessBoundaryGuard)
+      .useValue({ canActivate: () => true })
       .overrideProvider(PrismaService)
       .useValue(prisma)
       .overrideProvider('APPOINTMENT_REDIS')
