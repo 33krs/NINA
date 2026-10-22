@@ -41,7 +41,7 @@ interface SessionRow {
   userId: string;
   authVersion: number;
   createdAt: Date;
-  expiresAt: Date;
+  expiresAt: Date | null;
   revokedAt: Date | null;
   user: Account;
 }
@@ -49,9 +49,15 @@ interface TokenRow {
   id: string;
   sessionId: string;
   createdAt: Date;
-  expiresAt: Date;
+  expiresAt: Date | null;
   consumedAt: Date | null;
   session: SessionRow;
+}
+interface SuccessorData {
+  expiresAt: Date | null;
+}
+interface SuccessorInsert {
+  data: SuccessorData;
 }
 function persisted(): TokenRow {
   return {
@@ -201,6 +207,29 @@ describe('unregistered internal refresh rotation without automatic revocation', 
     ]);
     expect(persistedCalls).not.toContain(raw);
     expect(persistedCalls).not.toContain(successor);
+  });
+
+  it('rotates paired explicit null expiries without introducing a deadline', async () => {
+    const row = persisted();
+    row.expiresAt = row.session.expiresAt = null;
+    tx.refreshToken.findUnique.mockResolvedValue(row);
+    await expect(service.rotate(raw)).resolves.toEqual({
+      id,
+      account: identity,
+      expiresAt: null,
+      refreshToken: successor,
+    });
+    expect(tx.refreshToken.updateMany).toHaveBeenCalledTimes(1);
+    expect(tx.refreshToken.create).toHaveBeenCalledWith({
+      data: {
+        sessionId: id,
+        tokenHash: digest(successor),
+        createdAt: now,
+        expiresAt: null,
+      },
+      select: { id: true },
+    });
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
   });
 
   it.each([
@@ -357,6 +386,163 @@ describe('unregistered internal refresh rotation without automatic revocation', 
     },
   );
 
+  it.each(denials.filter(([name]) => !name.includes('expir')))(
+    'retains null-expiry security denial: %s',
+    async (_name, change) => {
+      const row = persisted();
+      row.expiresAt = row.session.expiresAt = null;
+      change(row);
+      tx.refreshToken.findUnique.mockResolvedValue(row);
+      await expect(service.rotate(raw)).resolves.toBeNull();
+      expect(tx.refreshToken.updateMany).not.toHaveBeenCalled();
+      expect(tx.refreshToken.create).not.toHaveBeenCalled();
+      expect(random).not.toHaveBeenCalled();
+    },
+  );
+
+  const invalidExpiries: unknown[] = [
+    undefined,
+    '2030-01-02T12:00:00.000Z',
+    expiry.getTime(),
+    false,
+    {},
+    new Date(NaN),
+    new Date(Infinity),
+    { getTime: () => expiry.getTime() },
+  ];
+  it.each(
+    invalidExpiries.flatMap((value) => [
+      [value, null],
+      [null, value],
+      [value, value],
+    ]),
+  )(
+    'denies malformed expiry pair %p / %p before writes',
+    async (tokenExpiry, sessionExpiry) => {
+      const row = persisted();
+      Object.assign(row, { expiresAt: tokenExpiry });
+      Object.assign(row.session, { expiresAt: sessionExpiry });
+      tx.refreshToken.findUnique.mockResolvedValue(row);
+      await expect(service.rotate(raw)).resolves.toBeNull();
+      expect(tx.refreshToken.updateMany).not.toHaveBeenCalled();
+      expect(tx.refreshToken.create).not.toHaveBeenCalled();
+      expect(random).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [null, expiry],
+    [expiry, null],
+  ])(
+    'denies mixed null/finite expiry %p / %p before writes',
+    async (tokenExpiry, sessionExpiry) => {
+      const row = persisted();
+      row.expiresAt = tokenExpiry;
+      row.session.expiresAt = sessionExpiry;
+      tx.refreshToken.findUnique.mockResolvedValue(row);
+      await expect(service.rotate(raw)).resolves.toBeNull();
+      expect(tx.refreshToken.updateMany).not.toHaveBeenCalled();
+      expect(tx.refreshToken.create).not.toHaveBeenCalled();
+      expect(random).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['token', 'session'])(
+    'denies a missing %s expiry instead of treating it as null',
+    async (missing) => {
+      const row = persisted();
+      row.expiresAt = row.session.expiresAt = null;
+      Reflect.deleteProperty(
+        missing === 'token' ? row : row.session,
+        'expiresAt',
+      );
+      tx.refreshToken.findUnique.mockResolvedValue(row);
+      await expect(service.rotate(raw)).resolves.toBeNull();
+      expect(tx.refreshToken.updateMany).not.toHaveBeenCalled();
+      expect(tx.refreshToken.create).not.toHaveBeenCalled();
+      expect(random).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves equal finite instants as independent expiry Dates', async () => {
+    const row = persisted();
+    row.expiresAt = new Date(expiry);
+    row.session.expiresAt = new Date(expiry);
+    tx.refreshToken.findUnique.mockResolvedValue(row);
+    const result = await service.rotate(raw);
+    expect(result?.expiresAt).toEqual(expiry);
+    expect(result?.expiresAt).not.toBe(row.expiresAt);
+    expect(result?.expiresAt).not.toBe(row.session.expiresAt);
+    const query = tx.refreshToken.create.mock.calls[0][0] as SuccessorInsert;
+    expect(query.data.expiresAt).toEqual(expiry);
+    expect(query.data.expiresAt).not.toBe(row.expiresAt);
+    expect(query.data.expiresAt).not.toBe(result?.expiresAt);
+  });
+
+  it('keeps null expiry after awaited settlement and clock advancement', async () => {
+    const row = persisted();
+    row.expiresAt = row.session.expiresAt = null;
+    tx.refreshToken.findUnique.mockResolvedValue(row);
+    prisma.$transaction.mockImplementation(async (callback) => {
+      const result = await callback(tx);
+      jest.setSystemTime(new Date('2040-01-01T00:00:00.000Z'));
+      return result;
+    });
+    await expect(service.rotate(raw)).resolves.toEqual({
+      id,
+      account: identity,
+      expiresAt: null,
+      refreshToken: successor,
+    });
+  });
+
+  it('denies a null-expiry commit failure without retry or recovery', async () => {
+    const row = persisted();
+    row.expiresAt = row.session.expiresAt = null;
+    tx.refreshToken.findUnique.mockResolvedValue(row);
+    prisma.$transaction.mockImplementation(async (callback) => {
+      await callback(tx);
+      throw new Error('Synthetic uncertain commit');
+    });
+    await expect(service.rotate(raw)).resolves.toBeNull();
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    expect(tx.refreshToken.updateMany).toHaveBeenCalledTimes(1);
+    expect(tx.refreshToken.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('snapshots finite expiry before awaited consumption mutates source Dates', async () => {
+    const row = persisted();
+    row.expiresAt = new Date(expiry);
+    row.session.expiresAt = new Date(expiry);
+    tx.refreshToken.findUnique.mockResolvedValue(row);
+    tx.refreshToken.updateMany.mockImplementation(async () => {
+      row.expiresAt.setUTCFullYear(2040);
+      row.session.expiresAt.setUTCFullYear(2040);
+      return { count: 1 };
+    });
+    expect((await service.rotate(raw))?.expiresAt).toEqual(expiry);
+    const query = tx.refreshToken.create.mock.calls[0][0] as SuccessorInsert;
+    expect(query.data.expiresAt).toEqual(expiry);
+  });
+
+  it('rechecks the finite snapshot despite mutation of returned or persisted Dates', async () => {
+    const row = persisted();
+    row.expiresAt = new Date(expiry);
+    row.session.expiresAt = new Date(expiry);
+    tx.refreshToken.findUnique.mockResolvedValue(row);
+    prisma.$transaction.mockImplementation(async (callback) => {
+      const result = await callback(tx);
+      row.expiresAt.setUTCFullYear(2040);
+      row.session.expiresAt.setUTCFullYear(2040);
+      const rotated = result as { expiresAt: Date };
+      rotated.expiresAt.setUTCFullYear(2040);
+      jest.setSystemTime(expiry);
+      return result;
+    });
+    await expect(service.rotate(raw)).resolves.toBeNull();
+    expect(tx.refreshToken.create).toHaveBeenCalledTimes(1);
+  });
+
   it.each([0, 2])(
     'denies conditional consumption count %p without a successor or retry',
     async (count) => {
@@ -411,29 +597,35 @@ describe('unregistered internal refresh rotation without automatic revocation', 
     expect(tx.refreshToken.create).toHaveBeenCalledTimes(1);
   });
 
-  it('does not resolve raw successor material before commit', async () => {
-    let release!: () => void;
-    let entered!: () => void;
-    const committed = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const callbackFinished = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    prisma.$transaction.mockImplementation(async (callback) => {
-      const result = await callback(tx);
-      entered();
-      await committed;
-      return result;
-    });
-    let resolved = false;
-    const pending = service.rotate(raw).then((result) => {
-      resolved = true;
-      return result;
-    });
-    await Promise.race([callbackFinished, pending]);
-    expect(resolved).toBe(false);
-    release();
-    expect((await pending)?.refreshToken).toBe(successor);
-  });
+  it.each([expiry, null])(
+    'does not resolve raw successor material before commit: %p',
+    async (expiresAt) => {
+      const row = persisted();
+      row.expiresAt = row.session.expiresAt = expiresAt;
+      tx.refreshToken.findUnique.mockResolvedValue(row);
+      let release!: () => void;
+      let entered!: () => void;
+      const committed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const callbackFinished = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      prisma.$transaction.mockImplementation(async (callback) => {
+        const result = await callback(tx);
+        entered();
+        await committed;
+        return result;
+      });
+      let resolved = false;
+      const pending = service.rotate(raw).then((result) => {
+        resolved = true;
+        return result;
+      });
+      await Promise.race([callbackFinished, pending]);
+      expect(resolved).toBe(false);
+      release();
+      expect((await pending)?.refreshToken).toBe(successor);
+    },
+  );
 });
