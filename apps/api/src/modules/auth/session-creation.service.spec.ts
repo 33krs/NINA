@@ -14,7 +14,10 @@ import type {
   AuthenticatedAccount,
   CredentialAuthenticationService,
 } from './credential-authentication.service';
-import { SessionCreationService } from './session-creation.service';
+import {
+  SessionCreationService,
+  type CreatedSession,
+} from './session-creation.service';
 
 jest.mock('node:crypto', () => ({
   ...jest.requireActual<typeof import('node:crypto')>('node:crypto'),
@@ -149,10 +152,48 @@ describe('unregistered internal session creation', () => {
     expect(JSON.stringify(tx.authSession.create.mock.calls)).not.toContain(raw);
   });
 
+  it('issues an explicitly nonexpiring session and initial digest-only credential', async () => {
+    const raw = Buffer.alloc(32, 7).toString('base64url');
+    const result = await create(null);
+    expect(result).toEqual({
+      id,
+      account: identity(),
+      expiresAt: null,
+      refreshToken: raw,
+    });
+    expect(tx.authSession.create).toHaveBeenCalledWith({
+      data: {
+        authVersion: 2,
+        createdAt: now,
+        expiresAt: null,
+        user: { connect: { id: owner } },
+        refreshTokens: {
+          create: {
+            tokenHash: createHash('sha256').update(raw).digest('hex'),
+            createdAt: now,
+            expiresAt: null,
+          },
+        },
+      },
+      select: { id: true },
+    });
+    expect(random).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(tx.authSession.create.mock.calls)).not.toContain(raw);
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), {
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      maxWait: 2000,
+      timeout: 5000,
+    });
+  });
+
   it.each([
     undefined,
-    null,
+    false,
+    0,
+    {},
+    { getTime: () => expiry.getTime() },
     expiry.toISOString(),
+    new Date(Infinity),
     new Date(NaN),
     now,
     new Date(now.getTime() - 1),
@@ -167,11 +208,70 @@ describe('unregistered internal session creation', () => {
     },
   );
 
-  it('does not write for rejected credentials', async () => {
-    credentials.authenticate.mockResolvedValue(null);
-    await expect(create()).resolves.toBeNull();
+  it('rejects an omitted runtime expiry before credential or database work', async () => {
+    await expect(
+      Reflect.apply(service.create, service, [
+        'synthetic.user',
+        'synthetic-input',
+      ]),
+    ).resolves.toBeNull();
+    expect(credentials.authenticate).not.toHaveBeenCalled();
     expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(random).not.toHaveBeenCalled();
   });
+
+  it('preserves null across credential, lookup and commit clock advancement', async () => {
+    credentials.authenticate.mockImplementation(async () => {
+      jest.setSystemTime(expiry);
+      return identity();
+    });
+    tx.user.findUnique.mockImplementation(async () => {
+      jest.setSystemTime(new Date('2040-01-01T00:00:00Z'));
+      return account();
+    });
+    prisma.$transaction.mockImplementation(async (callback) => {
+      const result = await callback(tx);
+      jest.setSystemTime(new Date('2050-01-01T00:00:00Z'));
+      return result;
+    });
+    expect((await create(null))?.expiresAt).toBeNull();
+    expect(tx.authSession.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('clones the finite caller expiry for persistence and the returned result', async () => {
+    const supplied = new Date(expiry);
+    const result = await create(supplied);
+    const query = tx.authSession.create.mock
+      .calls[0][0] as Prisma.AuthSessionCreateArgs;
+    expect(query.data.expiresAt).toEqual(expiry);
+    expect(query.data.expiresAt).not.toBe(supplied);
+    expect(query.data.refreshTokens).toEqual({
+      create: expect.objectContaining({ expiresAt: expiry }),
+    });
+    expect(result?.expiresAt).toEqual(expiry);
+    expect(result?.expiresAt).not.toBe(query.data.expiresAt);
+    expect(result?.expiresAt).not.toBe(supplied);
+  });
+
+  it('rechecks captured finite milliseconds even if the callback result Date is mutated', async () => {
+    prisma.$transaction.mockImplementation(async (callback) => {
+      const result = (await callback(tx)) as CreatedSession;
+      result.expiresAt.setTime(expiry.getTime() + 60_000);
+      jest.setSystemTime(expiry);
+      return result;
+    });
+    await expect(create()).resolves.toBeNull();
+    expect(tx.authSession.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([expiry, null])(
+    'does not write for rejected credentials with expiry %p',
+    async (expiresAt) => {
+      credentials.authenticate.mockResolvedValue(null);
+      await expect(create(expiresAt)).resolves.toBeNull();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     null,
@@ -182,8 +282,11 @@ describe('unregistered internal session creation', () => {
     'rejects an absent, mismatched, disabled or version-changed authenticated account',
     async (current) => {
       tx.user.findUnique.mockResolvedValue(current);
-      await expect(create()).resolves.toBeNull();
+      for (const expiresAt of [expiry, null]) {
+        await expect(create(expiresAt)).resolves.toBeNull();
+      }
       expect(tx.authSession.create).not.toHaveBeenCalled();
+      expect(random).not.toHaveBeenCalled();
     },
   );
 
@@ -204,46 +307,52 @@ describe('unregistered internal session creation', () => {
     expect((await create(supplied))?.expiresAt).toEqual(expiry);
   });
 
-  it('returns current minimal identity without active-state or persistence fields', async () => {
-    tx.user.findUnique.mockResolvedValue(
-      account({ role: UserRole.INSTRUCTOR }),
-    );
-    expect((await create())?.account).toEqual({
-      ...identity(),
-      role: UserRole.INSTRUCTOR,
-    });
-  });
+  it.each([expiry, null])(
+    'returns current minimal identity without persistence fields with expiry %p',
+    async (expiresAt) => {
+      tx.user.findUnique.mockResolvedValue(
+        account({ role: UserRole.INSTRUCTOR }),
+      );
+      expect((await create(expiresAt))?.account).toEqual({
+        ...identity(),
+        role: UserRole.INSTRUCTOR,
+      });
+    },
+  );
 
-  it('does not resolve creation before commit or return raw material after commit rejection', async () => {
-    let release!: () => void;
-    let entered!: () => void;
-    const committed = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const callbackFinished = new Promise<void>((resolve) => {
-      entered = resolve;
-    });
-    prisma.$transaction.mockImplementation(async (callback) => {
-      const result = await callback(tx);
-      entered();
-      await committed;
-      return result;
-    });
-    let resolved = false;
-    const pending = create().then((result) => {
-      resolved = true;
-      return result;
-    });
-    await Promise.race([callbackFinished, pending]);
-    expect(resolved).toBe(false);
-    release();
-    expect((await pending)?.refreshToken).toHaveLength(43);
-    prisma.$transaction.mockImplementation(async (callback) => {
-      await callback(tx);
-      throw new Error('synthetic commit failure');
-    });
-    await expect(create()).resolves.toBeNull();
-  });
+  it.each([expiry, null])(
+    'withholds creation until commit and denies rejected commit with expiry %p',
+    async (expiresAt) => {
+      let release!: () => void;
+      let entered!: () => void;
+      const committed = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const callbackFinished = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      prisma.$transaction.mockImplementation(async (callback) => {
+        const result = await callback(tx);
+        entered();
+        await committed;
+        return result;
+      });
+      let resolved = false;
+      const pending = create(expiresAt).then((result) => {
+        resolved = true;
+        return result;
+      });
+      await Promise.race([callbackFinished, pending]);
+      expect(resolved).toBe(false);
+      release();
+      expect((await pending)?.refreshToken).toHaveLength(43);
+      prisma.$transaction.mockImplementation(async (callback) => {
+        await callback(tx);
+        throw new Error('synthetic commit failure');
+      });
+      await expect(create(expiresAt)).resolves.toBeNull();
+    },
+  );
 
   it('does not return credentials if expiration passes while committing', async () => {
     prisma.$transaction.mockImplementation(async (callback) => {
@@ -270,8 +379,11 @@ describe('unregistered internal session creation', () => {
         random.mockImplementation(() => {
           throw error;
         });
-      await expect(create()).resolves.toBeNull();
-      expect(prisma.$transaction.mock.calls.length).toBeLessThanOrEqual(1);
+      for (const expiresAt of [expiry, null]) {
+        prisma.$transaction.mockClear();
+        await expect(create(expiresAt)).resolves.toBeNull();
+        expect(prisma.$transaction.mock.calls.length).toBeLessThanOrEqual(1);
+      }
     },
   );
 });

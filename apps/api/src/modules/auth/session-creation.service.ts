@@ -19,7 +19,7 @@ const TRANSACTION_LIMITS = { maxWait: 2000, timeout: 5000 } as const;
 export interface CreatedSession {
   readonly id: string;
   readonly account: AuthenticatedAccount;
-  readonly expiresAt: Date;
+  readonly expiresAt: Date | null;
   readonly refreshToken: string;
 }
 
@@ -38,10 +38,17 @@ export class SessionCreationService {
     try {
       // Snapshot caller-owned Date before credential/transaction awaits.
       const milliseconds =
-        expiresAt instanceof Date ? expiresAt.getTime() : NaN;
-      if (!Number.isFinite(milliseconds) || milliseconds <= Date.now())
+        expiresAt === null
+          ? null
+          : expiresAt instanceof Date
+            ? expiresAt.getTime()
+            : NaN;
+      if (
+        milliseconds !== null &&
+        (!Number.isFinite(milliseconds) || milliseconds <= Date.now())
+      )
         return null;
-      const expiration = new Date(milliseconds);
+      const expiration = milliseconds === null ? null : new Date(milliseconds);
       const authenticated = await this.credentials.authenticate(
         username,
         password,
@@ -61,7 +68,7 @@ export class SessionCreationService {
             account.id !== authenticated.id ||
             account.isActive !== true ||
             account.authVersion !== authenticated.authVersion ||
-            expiration <= createdAt
+            (milliseconds !== null && milliseconds <= createdAt.getTime())
           )
             return null;
 
@@ -92,7 +99,7 @@ export class SessionCreationService {
               role: account.role,
               authVersion: account.authVersion,
             },
-            expiresAt: new Date(expiration),
+            expiresAt: milliseconds === null ? null : new Date(milliseconds),
             refreshToken,
           };
         },
@@ -101,7 +108,9 @@ export class SessionCreationService {
           isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
         },
       );
-      return result && result.expiresAt.getTime() > Date.now() ? result : null;
+      return result && (milliseconds === null || milliseconds > Date.now())
+        ? result
+        : null;
     } catch {
       // No retry after a possibly committed operation, and no supplied material.
       return null;

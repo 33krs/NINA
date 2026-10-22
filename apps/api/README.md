@@ -86,8 +86,8 @@ sentinels are introduced. Existing finite values are not rewritten.
 
 For controlled nonpublic student practice, the selected backend outcome is no
 time/inactivity-based forced login, with voluntary logout and security/account
-revocation retained. Persistence, internal validation and internal rotation support explicit null
-expiry as described below; creation still requires finite expiry. Undefined or malformed expiry
+revocation retained. Persistence and internal creation, validation and rotation support explicit null
+expiry as described below. Undefined or malformed expiry
 is not an implicit nonexpiring credential. Row checks do not establish cross-row
 null/finite expiry matching; service changes must preserve that binding and all
 account checks. Repository `strictNullChecks: false` means a passing API build
@@ -108,11 +108,16 @@ rewriting, deletion, or automatic database downgrade is authorized here.
 ## Internal session creation (not registered or exposed)
 
 `SessionCreationService.create(username, password, expiresAt)` composes credential
-verification with a bounded serializable transaction. It accepts only a
-caller-provided finite future `Date`, snapshots it before awaiting credentials,
-and rechecks account activity, `authVersion` and expiration before writing. The
-session and its initial refresh row share explicit creation/expiration timestamps
-and are created atomically. A fresh 32-byte CSPRNG credential is persisted only
+verification with a bounded serializable transaction. The third argument is
+required: exact `null` explicitly requests no time-based expiry; an actual valid
+finite future `Date` retains legacy finite expiry. Omitted, undefined, malformed,
+invalid or Date-like values deny before credential/database work. Finite expiry
+is captured numerically before awaiting credentials and rechecked after account
+lookup and transaction settlement, independently of mutable Date objects. Null
+survives clock advancement without skipping current account identity, activity
+or `authVersion` checks. The session and initial refresh row are created atomically
+with shared creation timestamps and identical null or cloned finite expiry.
+`CreatedSession.expiresAt` returns `Date | null`. A fresh 32-byte CSPRNG credential is persisted only
 as its lowercase SHA-256 digest; raw refresh material and a minimal current
 account identity are returned only after successful commit and a final expiry
 check. Rejection or caught dependency/transaction/commit failure returns `null`
@@ -120,8 +125,8 @@ without retry or exposing details. A failure response does not prove no row was
 committed, including when expiration passes during commit.
 
 Transaction wait/execution bounds are infrastructure limits, not session lifetime
-policy. This creation service still requires explicit finite expiry; nonexpiring
-issuance remains a follow-up to the selected no-time-expiry practice policy.
+policy. Explicit-null issuance implements the selected no-time-expiry practice
+policy internally; it does not activate public login or browser persistence.
 Tests use typed dependency doubles and a controlled clock; they do not prove live
 PostgreSQL rollback, races or isolation. Creation alone does not establish an
 ongoing check or logout integration; the internal collaborator below provides
@@ -150,8 +155,9 @@ errors return `null` without retry or diagnostics. The snapshot does not guarant
 latest-at-return revocation visibility or retroactively cancel in-flight work.
 
 Validation performs no writes. Owner-scoped revocation remains unchanged and
-works independently of expiry, including owned null-expiry sessions. Creation remains finite-only until its follow-up change; validation and rotation
-do not issue initial nonexpiring sessions. Typed dependency doubles and a controlled
+works independently of expiry, including owned null-expiry sessions. Initial
+nonexpiring issuance belongs to the credential-backed creation service;
+validation and rotation do not create initial sessions. Typed dependency doubles and a controlled
 clock cover internal boundaries, not live PostgreSQL rollback, races or isolation.
 No routes, module registration, JWT verification, cookies, frontend persistence,
 or public logout button are added.
@@ -192,9 +198,8 @@ duration or extension. Old rows remain. Raw successor material and minimal curre
 identity are returned only after transaction settlement. Successor persistence
 and the result retain exact null, or independent Dates cloned from the captured
 finite instant. After settlement, the captured finite expiry is rechecked even
-if Date objects have mutated; null survives clock advancement. Creation remains
-finite-only until the separate issuance change, and no null session is issued by
-this internal rotation contract.
+if Date objects have mutated; null survives clock advancement. Initial issuance
+is handled separately by the credential-backed creation service, not rotation.
 
 For controlled nonpublic testers, consumed-token reuse **denies without automatic
 session, family or account revocation**. Missing/invalid credentials, conditional
