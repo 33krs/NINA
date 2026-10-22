@@ -3,10 +3,12 @@ import { Test } from '@nestjs/testing';
 import { afterAll, beforeAll, describe, expect, it } from '@jest/globals';
 import { randomUUID } from 'node:crypto';
 import { type AddressInfo } from 'node:net';
+import { URL } from 'node:url';
 import { createClient } from 'redis';
 import { env } from 'node:process';
 import { AppModule } from '../../app.module';
 import { PrismaService } from '../../prisma/prisma.service';
+import { AccessBoundaryGuard } from '../auth/access-boundary.guard';
 import {
   AppointmentLockService,
   LOCK_TTL_MS,
@@ -144,28 +146,60 @@ describe('live fixture cleanup without services', () => {
   });
 });
 
-// Explicit opt-in; only the repository's localhost Compose development services.
-const { fetch } = globalThis;
-const live =
-  env.NINA_APPOINTMENTS_LIVE_TESTS === '1' ? describe : describe.skip;
-live('appointment acceptance with actual local Redis/PostgreSQL', () => {
-  const fixture = randomUUID();
-  const prisma = new PrismaService({
-    datasourceUrl:
-      'postgresql://nina_admin:nina_dev_password@127.0.0.1:5432/nina_db',
-  });
-  const redis = createClient({
-    url: 'redis://127.0.0.1:6379',
-    disableOfflineQueue: true,
-    socket: {
-      connectTimeout: 1500,
-      socketTimeout: 1500,
-      reconnectStrategy: false,
+function requireTestDatabaseUrl(value: unknown): string {
+  try {
+    if (typeof value !== 'string' || value.length === 0) throw new Error();
+    const url = new URL(value);
+    if (
+      !['postgresql:', 'postgres:'].includes(url.protocol) ||
+      url.hostname !== '127.0.0.1' ||
+      url.pathname.length < 2 ||
+      url.hash
+    )
+      throw new Error();
+    return value;
+  } catch {
+    throw new Error(
+      'Private loopback appointment test database configuration required',
+    );
+  }
+}
+
+describe('private appointment database configuration without services', () => {
+  it.each([
+    undefined,
+    null,
+    1,
+    '',
+    'not-a-url',
+    'https://127.0.0.1/fixture',
+    'postgresql://example.invalid/fixture',
+  ])(
+    'rejects invalid configuration without echoing its value (%#)',
+    (value) => {
+      expect(() => requireTestDatabaseUrl(value)).toThrow(
+        'Private loopback appointment test database configuration required',
+      );
     },
+  );
+  it('accepts an explicit loopback test database URL without connecting', () => {
+    const value = 'postgresql://127.0.0.1/fixture';
+    expect(requireTestDatabaseUrl(value)).toBe(value);
   });
-  redis.on('error', () => {
-    /* Command rejections surface service failures. */
-  });
+});
+
+// Explicit opt-in; only private localhost development services, never defaults.
+const { fetch } = globalThis;
+const enabled = env.NINA_APPOINTMENTS_LIVE_TESTS === '1';
+const live = enabled ? describe : describe.skip;
+live('live appointment persistence (access boundary overridden)', () => {
+  if (!enabled) {
+    it.skip('requires explicit private local service configuration', () => {});
+    return;
+  }
+  const fixture = randomUUID();
+  let prisma: PrismaService | undefined;
+  let redis: ReturnType<typeof createClient> | undefined;
   const input = {
     patientId: fixture,
     professionalId: `step5-test-${fixture}`,
@@ -179,7 +213,25 @@ live('appointment acceptance with actual local Redis/PostgreSQL', () => {
   let url: string;
 
   beforeAll(async () => {
+    const datasourceUrl = requireTestDatabaseUrl(
+      env.NINA_APPOINTMENTS_TEST_DATABASE_URL,
+    );
+    prisma = new PrismaService({ datasourceUrl });
+    redis = createClient({
+      url: 'redis://127.0.0.1:6379',
+      disableOfflineQueue: true,
+      socket: {
+        connectTimeout: 1500,
+        socketTimeout: 1500,
+        reconnectStrategy: false,
+      },
+    });
+    redis.on('error', () => {
+      /* Rejections surface service failures. */
+    });
     const module = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(AccessBoundaryGuard)
+      .useValue({ canActivate: () => true })
       .overrideProvider(PrismaService)
       .useValue(prisma)
       .overrideProvider('APPOINTMENT_REDIS')
@@ -202,7 +254,7 @@ live('appointment acceptance with actual local Redis/PostgreSQL', () => {
 
   afterAll(async () => {
     await cleanupLiveFixture({
-      redisReady: () => redis.isReady,
+      redisReady: () => redis?.isReady === true,
       created,
       releaseOwner: (owner) =>
         redis.eval(RELEASE_LOCK, { keys: [key], arguments: [owner] }),
@@ -222,9 +274,9 @@ live('appointment acceptance with actual local Redis/PostgreSQL', () => {
         ).toBeNull();
       },
       closeApp: () => app?.close(),
-      redisOpen: () => redis.isOpen,
+      redisOpen: () => redis?.isOpen === true,
       destroyRedis: () => redis.destroy(),
-      disconnectPrisma: () => prisma.$disconnect(),
+      disconnectPrisma: () => prisma?.$disconnect() ?? Promise.resolve(),
     });
   });
 

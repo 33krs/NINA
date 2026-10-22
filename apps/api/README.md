@@ -1,5 +1,31 @@
 # API verification
 
+## TEMPORARY CLINICAL API BLOCK
+
+**Decision: 2026-10-22, accepted by the user.** This source revision installs a
+global fail-closed access boundary: all clinical handlers return HTTP 401 before
+controller/service execution. Only the existing health `GET /` handler is allowed;
+automatic HEAD handling is denied. This describes repository behavior, not proof
+of deployment to a running server.
+
+The block is deliberate and **temporary**, pending verified identity and accepted
+clinical resource permissions; it is not a database outage. It has no automatic
+expiry or environment bypass. Evolve the narrow policy only after authentication,
+resource authorization, and negative HTTP tests are proven. Do not remove the
+global guard or grant every logged-in role unrestricted clinical access. No login,
+refresh/logout route, JWT, cookie, or browser integration is activated here;
+internal nonexpiring session foundations remain unregistered and unchanged.
+
+`access-boundary.http.spec.ts` exercises AppModule without overriding the guard.
+Appointment/odontogram controller HTTP suites and the opt-in appointment live
+persistence suite explicitly override the concrete guard to test their isolated
+behavior; they are **not authorization proof**. Real appointment integration still
+requires separate authorization and explicit opt-in. Supply its database URL
+privately through `NINA_APPOINTMENTS_TEST_DATABASE_URL`; no credential or default
+database URL is embedded. Only a PostgreSQL URL targeting `127.0.0.1` is accepted,
+and skipped collection creates no database/Redis client. This removes a prior
+source literal, not credentials from Git history.
+
 ## Local account password hashing foundation (not exposed)
 
 The auth module provides a reusable password hash/verify foundation and an

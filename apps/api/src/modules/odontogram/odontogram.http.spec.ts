@@ -12,10 +12,11 @@ import { type AddressInfo } from 'node:net';
 import { AppModule } from '../../app.module';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OdontogramService } from './odontogram.service';
+import { AccessBoundaryGuard } from '../auth/access-boundary.guard';
 
 const { fetch } = globalThis;
 
-describe('odontograms over HTTP', () => {
+describe('odontogram HTTP behavior (dependency doubles; access boundary overridden)', () => {
   const patientId = '3dfc6dbf-c6f9-478b-b7dc-ff6d9a622137';
   const current = {
     id: 'odontogram-1',
@@ -59,6 +60,8 @@ describe('odontograms over HTTP', () => {
     service.getVersions.mockResolvedValue([]);
 
     const module = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(AccessBoundaryGuard)
+      .useValue({ canActivate: () => true })
       .overrideProvider(PrismaService)
       .useValue({})
       .overrideProvider(OdontogramService)
