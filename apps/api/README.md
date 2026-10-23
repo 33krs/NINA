@@ -61,6 +61,52 @@ not parse or validate a JSON body. Cookie retention/deletion, no-store responses
 login attempt limits, route/frontend activation and clinical authorization are
 separate pending behaviors. No browser session flow or deployment is activated.
 
+## Browser session cookie fields (not registered or exposed)
+
+`BrowserSessionCookies` serializes two separate Set-Cookie field values, access
+first, or returns `null` if either credential is invalid. It never emits an HTTP
+response or sets browser cookies. Trusted internal callers must supply freshly
+issued credentials: syntax checking proves no signature, identity, freshness,
+session ownership or permission. Do not accept request values as issued tokens.
+
+The required constructor configuration copies integer `accessMaxAgeSeconds`
+(1–900) and `refreshMaxAgeSeconds` (1–34,560,000). There are no default activation
+values, environment/clock reads, or dependencies on keys, hosts or services.
+The 400-day application ceiling follows [Chrome's documented lifetime cap](https://developer.chrome.com/blog/cookie-max-age-expires?hl=en),
+not a universal browser guarantee or backend session duration.
+
+Fixed names are `__Host-nina-access` and `__Host-nina-refresh`, each with
+`Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=<configured seconds>` and no
+Domain. There is no insecure/LAN/localhost toggle or caller-selected attribute.
+Access values require three nonempty base64url-alphabet segments; no JWT decode
+or verification occurs. Refresh values require the existing canonical 32-byte,
+43-character base64url format. Injection characters and oversized values deny;
+each complete ASCII field is at most 4096 bytes, not the JWT verifier's 8192
+input limit. Never truncate tokens or comma-join the two fields. Returning a pair
+is not atomic browser storage or a guarantee of browser acceptance/retention.
+
+`clear()` returns matching names, host-only scope, Path and security attributes,
+empty values, `Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`. Future emission
+must use the same HTTPS host. This is deletion serialization, **not backend
+revocation or working logout**; a future logout route must perform the accepted
+server-side revocation independently. No raw refresh JSON/localStorage is added.
+
+Explicit null backend expiry and no time/idle forced-login policy are unchanged.
+Browser expiry, clearing, eviction or another browser can still require login;
+future successful issuance/rotation may renew finite retention, never guarantee
+permanent storage or retry consumed credentials. Response delay can leave an
+access cookie after JWT expiry: JWT `exp` and current online session/account
+checks remain authoritative. HttpOnly does not stop XSS-triggered requests;
+SameSite does not replace Origin/CSRF admission. LAN requires the same-origin
+HTTPS contract; actual address, certificate and ingress remain unset until
+activation. Clinical blocking, request parsing, no-store, login limits and route
+activation remain unchanged/deferred. No browser/TLS/deployment proof is claimed.
+
+Protocol references: [MDN cookie attributes](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie),
+[matching deletion](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/Cookies),
+[RFC6265 limits/eviction](https://httpwg.org/specs/rfc6265.html#section-6.1),
+and [OWASP session guidance](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html).
+
 ## Internal access credentials (not registered or exposed)
 
 `AccessCredentialService` is constructor-configured and unregistered. Its
