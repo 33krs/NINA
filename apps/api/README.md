@@ -180,6 +180,32 @@ attempt-limit, origin/TLS/ingress and authorization prerequisites stay unchanged
 References: [RFC9111 no-store](https://httpwg.org/specs/rfc9111.html#section-5.2.2.5),
 [Nest functional/global middleware](https://docs.nestjs.com/middleware).
 
+## Browser login-input extraction (not registered or exposed)
+
+`BrowserLoginInputReader.read(body)` accepts an already-parsed plain record with
+exactly two own enumerable data fields, `username` and `password`, both strings.
+It returns a fresh frozen readonly snapshot or `null`, never partial extraction.
+Null-prototype records are allowed; arrays, class/custom-prototype instances,
+inherited, extra or symbol fields, accessors and malformed shapes are denied.
+Credential getters are never invoked; throwing reflective operations fail closed.
+Inputs are not mutated, coerced, trimmed, canonicalized or Unicode-normalized.
+
+Username input is at most 128 UTF-16 code units. Password input is at most 1024
+UTF-8 bytes, with a cheap 1024-code-unit bound before byte counting. These are
+transport ceilings, **not authentication eligibility**: empty, short or otherwise
+ineligible strings may pass extraction. Existing username canonicalization and
+password verification remain authoritative, including Unicode validity checks.
+No identity, password hashing, cookie fallback, session operation or logging is
+performed. The snapshot still contains sensitive input; callers must not log it.
+
+This reader cannot detect duplicate raw JSON keys already collapsed by parsing
+or enforce pre-parser request-byte limits. Those parser protections and login
+attempt controls remain activation prerequisites; this is not complete request
+resource protection. No route, middleware, module or frontend is registered.
+The temporary clinical block, null backend expiry, strict consumed-refresh denial,
+and pending origin/TLS/ingress requirements remain unchanged. No browser login,
+HTTP runtime, database or deployment proof is claimed by these pure reader tests.
+
 ## Internal access credentials (not registered or exposed)
 
 `AccessCredentialService` is constructor-configured and unregistered. Its
