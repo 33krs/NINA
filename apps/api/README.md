@@ -107,6 +107,47 @@ Protocol references: [MDN cookie attributes](https://developer.mozilla.org/en-US
 [RFC6265 limits/eviction](https://httpwg.org/specs/rfc6265.html#section-6.1),
 and [OWASP session guidance](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html).
 
+## Browser request session-cookie extraction (not registered or exposed)
+
+`BrowserSessionCookieReader.read(request)` returns a fresh readonly snapshot with
+nullable `accessToken` and `refreshToken`, or `null` for malformed or ambiguous
+input. Missing Cookie fields and unrelated well-formed cookies yield both values
+null. Either credential can appear independently: refresh extraction must remain
+possible after the access cookie expires. Callers decide later which credential
+their route requires; this reader performs no renewal or authentication.
+
+The input must provide Node's alternating string `rawHeaders` array with valid
+header names. Zero or one case-insensitive Cookie field is accepted; duplicate
+fields deny even with identical values. There is no normalized-header,
+Authorization, body, query, decoding or alternate-name fallback. Proxies can
+alter duplicates before Node; later ingress verification remains necessary.
+
+The deliberately narrow application grammar accepts a nonempty ASCII Cookie
+value of at most8192 bytes: HTTP-token names, first `=` separating each name and
+value, and unquoted RFC6265 cookie-octet values. Pairs are separated by semicolons
+with zero or more following ASCII spaces. Leading/trailing whitespace, spaces
+around `=`, tabs, quotes, backslashes, commas, controls, Unicode and empty or
+malformed pairs deny the whole result. Unrelated empty values, literal `=` and
+`%` remain allowed; this is not a generic/full RFC cookie parser.
+
+Only exact case-sensitive `__Host-nina-access` and `__Host-nina-refresh` names
+are extracted. Duplicate NINA names or an invalid present credential deny the
+entire result, never first/last selection or partial success. Access input is
+at most4096 characters with three nonempty base64url-alphabet segments; refresh
+input is canonical32-byte/43-character base64url. Values are never trimmed,
+decoded, concatenated or truncated. These are input bounds, not browser limits.
+
+Parsing proves neither signature nor current account/session validity, CSRF
+admission, identity, TLS or clinical permission. Request cookies do not reveal
+their original Secure/HttpOnly/SameSite attributes. The existing access verifier,
+online session checks and POST admission remain separate requirements. Null
+backend expiry, no time/idle forced-login policy, consumed-refresh denial and the
+temporary clinical block remain unchanged. No route, browser login/logout,
+cookie emission, LAN/TLS configuration or deployment is activated.
+
+References: [RFC6265 request-cookie syntax and semantics](https://httpwg.org/specs/rfc6265.html#section-4.2),
+[Node rawHeaders](https://nodejs.org/api/http.html#messagerawheaders).
+
 ## Internal access credentials (not registered or exposed)
 
 `AccessCredentialService` is constructor-configured and unregistered. Its
