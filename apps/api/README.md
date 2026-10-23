@@ -26,6 +26,41 @@ database URL is embedded. Only a PostgreSQL URL targeting `127.0.0.1` is accepte
 and skipped collection creates no database/Redis client. This removes a prior
 source literal, not credentials from Git history.
 
+## Browser authentication POST admission (not registered or exposed)
+
+`BrowserRequestPolicy` defines admission for future same-origin browser auth
+POSTs, including login. It mounts no route and leaves the clinical block above
+unchanged. Student LAN access must use one canonical **HTTPS** browser origin;
+there is no HTTP, LAN or localhost exemption. The actual address, certificate,
+TLS termination and ingress/proxy configuration remain unset activation
+prerequisites, not values discovered from request headers or the environment.
+
+The constructor requires that explicit primitive HTTPS origin with exact
+`URL.origin` spelling: no paths, credentials, wildcard, whitespace or defaults.
+`allowsAuthenticationPost` denies malformed inputs and requires exact `POST`
+with Node's alternating string `rawHeaders`, never a normalized-header fallback:
+
+- One `Origin` byte-matching configuration; no Host/forwarded/Referer trust.
+- One `X-NINA-CSRF-Protection: 1`, a public **nonsecret marker**, not a CSRF token,
+  credential or identity proof.
+- One `application/json` Content-Type, optionally only `charset=utf-8`. Media type
+  and charset are case-insensitive; space/tab may surround the semicolon/equals,
+  but no outer whitespace, quoted charset, extra parameters or simple types.
+- Optional `Sec-Fetch-Site`, if present exactly `same-origin`; it never substitutes
+  for the required Origin, marker or JSON media type.
+
+Security header names are case-insensitive and any duplicate is denied, even
+identical values. No CORS allowance is introduced. Later activation must apply
+this policy to every authentication POST and verify ingress: proxies can strip
+or combine duplicates before Node. Tests prove only the delivered Node header
+representation, not unchanged wire bytes or browser/TLS operation.
+
+Nonbrowser clients can forge these headers; admission proves neither identity
+nor TLS and does not cover same-origin XSS or client-side CSRF. The policy does
+not parse or validate a JSON body. Cookie retention/deletion, no-store responses,
+login attempt limits, route/frontend activation and clinical authorization are
+separate pending behaviors. No browser session flow or deployment is activated.
+
 ## Internal access credentials (not registered or exposed)
 
 `AccessCredentialService` is constructor-configured and unregistered. Its
