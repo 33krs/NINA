@@ -57,7 +57,7 @@ representation, not unchanged wire bytes or browser/TLS operation.
 
 Nonbrowser clients can forge these headers; admission proves neither identity
 nor TLS and does not cover same-origin XSS or client-side CSRF. The policy does
-not parse or validate a JSON body. Cookie retention/deletion, no-store responses,
+not parse or validate a JSON body. Cookie retention/deletion, no-store registration,
 login attempt limits, route/frontend activation and clinical authorization are
 separate pending behaviors. No browser session flow or deployment is activated.
 
@@ -99,7 +99,7 @@ access cookie after JWT expiry: JWT `exp` and current online session/account
 checks remain authoritative. HttpOnly does not stop XSS-triggered requests;
 SameSite does not replace Origin/CSRF admission. LAN requires the same-origin
 HTTPS contract; actual address, certificate and ingress remain unset until
-activation. Clinical blocking, request parsing, no-store, login limits and route
+activation. Clinical blocking, request parsing, no-store registration, login limits and route
 activation remain unchanged/deferred. No browser/TLS/deployment proof is claimed.
 
 Protocol references: [MDN cookie attributes](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie),
@@ -147,6 +147,38 @@ cookie emission, LAN/TLS configuration or deployment is activated.
 
 References: [RFC6265 request-cookie syntax and semantics](https://httpwg.org/specs/rfc6265.html#section-4.2),
 [Node rawHeaders](https://nodejs.org/api/http.html#messagerawheaders).
+
+## Browser authentication no-store boundary (not registered or exposed)
+
+`browserAuthNoStore` is a dependency-free functional Express middleware. It
+replaces `Cache-Control` with exactly `no-store` before continuing once. It reads
+no request properties or credentials and changes no status, body, unrelated
+headers, cookies or session state. Header-write failures propagate rather than
+continuing with an apparently protected response.
+
+Future activation must register this middleware with `app.use(...)` on the
+complete authentication boundary **before** `init()`/`listen()` and any body
+parser. This must cover successful responses and all relevant failure paths,
+including login rejection and malformed or oversized bodies. Nest module-only
+middleware or an interceptor would run too late for earlier parser errors.
+Later handlers, filters and ingress must not override this policy; the middleware
+does not wrap response methods or prevent deliberate later header replacement.
+
+`Cache-Control: no-store` instructs cooperative private and shared HTTP caches
+not to store the request or response. `no-cache` or `private` alone are not
+equivalent. This is not encryption, session revocation, a privacy guarantee, or
+retroactive cache/history erasure. No additional cache headers or client-storage
+clearing directives are emitted.
+
+HTTP tests use only a tiny isolated test application, synthetic handlers and an
+explicit test-only parser limit. They prove header behavior through success,
+guard/handler errors and parser rejection; they do not activate authentication
+routes or protect a running NINA deployment. Main bootstrap, the temporary
+clinical block, null backend expiry, refresh policy and all remaining body,
+attempt-limit, origin/TLS/ingress and authorization prerequisites stay unchanged.
+
+References: [RFC9111 no-store](https://httpwg.org/specs/rfc9111.html#section-5.2.2.5),
+[Nest functional/global middleware](https://docs.nestjs.com/middleware).
 
 ## Internal access credentials (not registered or exposed)
 
