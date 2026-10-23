@@ -26,6 +26,40 @@ database URL is embedded. Only a PostgreSQL URL targeting `127.0.0.1` is accepte
 and skipped collection creates no database/Redis client. This removes a prior
 source literal, not credentials from Git history.
 
+## Internal access credentials (not registered or exposed)
+
+`AccessCredentialService` is constructor-configured and unregistered. Its
+`issue(sessionId, ownerId, authVersion)` first requires successful online
+`SessionService.validate`; `verify(token)` verifies the signature and strict
+header/claims before a new online check and returns the **current** account
+identity. Errors or online denial return `null`, with no supplied values logged.
+Invalid configuration throws only a generic configuration error.
+
+Callers must explicitly supply matching local RSA private/public `KeyObject`s
+with at least 2048-bit moduli, exact issuer/audience strings, and an integer
+`lifetimeSeconds` of 1–900. Configuration and keys are copied at construction.
+There are no defaults, environment reads, remote key lookups, or provisioning
+mechanisms. Direct `jsonwebtoken` 9.0.3 fixes RS256; the protected type is
+`nina-access+jwt`. No token-selected key, algorithm negotiation, or insecure
+compatibility option is enabled.
+
+Tokens contain only `sub`, `sid`, `authVersion`, `iat`, `exp`, `iss`, and `aud`.
+Verification bounds input to 8192 characters, requires exact header/claim shape,
+UUID identities, a bounded integer authentication version and nonnegative safe
+integer dates, rejects future issuance and excess lifetime, and denies at the
+exact expiry boundary, including after awaited online validation. Tokens carry
+no username, role, refresh credential, or clinical permission.
+
+This short credential lifetime is **not a backend session duration or forced-login
+policy**. Explicit null backend expiry remains unchanged; finite or revoked
+sessions still fail online validation even with a cryptographically valid token.
+Issuance/verification adds no renewal, recovery, or uninterrupted-access promise.
+The temporary clinical block above remains intact: no browser login, HTTP
+transport, cookie policy, module registration, or clinical access is activated.
+Deterministic tests use ephemeral keys, fake time and session doubles; existing
+session tests independently cover nullable expiry. No live database proof is
+claimed by these credential tests.
+
 ## Local account password hashing foundation (not exposed)
 
 The auth module provides a reusable password hash/verify foundation and an
