@@ -206,6 +206,47 @@ The temporary clinical block, null backend expiry, strict consumed-refresh denia
 and pending origin/TLS/ingress requirements remain unchanged. No browser login,
 HTTP runtime, database or deployment proof is claimed by these pure reader tests.
 
+## Bounded browser HTTP JSON input (not registered or exposed)
+
+`createBrowserAuthJson({ maxBytes, readTimeoutMs })` creates an unregistered
+dependency-free Express middleware. Both limits are mandatory copied positive
+safe integers: bytes cannot exceed Node's Buffer maximum and the read deadline
+cannot exceed 2,147,483,647 milliseconds. There are no production values/defaults
+or environment reads. A body-read deadline is **not session expiry**.
+
+The reader requires untouched binary IncomingMessage input: no body marker,
+earlier consumption/reader, ended/destroyed stream or text encoding. It accepts
+absent Content-Encoding or exactly one case-insensitive identity value only;
+compressed, unknown, combined and duplicate encodings are denied, not inflated.
+Actual entity bytes are counted before retaining chunks; HTTP transfer/chunk
+framing is excluded. Content-Length is only an early rejection hint. The crossing
+chunk is not retained and input is never truncated or partially parsed.
+
+Oversize input receives generic 413, unsupported encoding 415, invalid input 400
+and an unfinished read 408 where writable. Rejected connections close without
+waiting for an attacker-controlled tail. Abort/error/response completion clears
+the reader's own buffers/listeners/timer; only successful complete reads continue
+once. Disconnected clients may receive no response. No shared server/socket
+timeout policy is changed. The accumulator bound excludes socket/runtime buffers,
+a delivered chunk, bounded copying/decoding and concurrency; this is not complete
+DoS protection or an ingress/header-timeout policy.
+
+Complete bounded bytes must pass `isUtf8` before UTF-8 decoding and JSON.parse.
+Empty, BOM-prefixed, malformed and trailing-junk JSON is rejected without repair.
+Arbitrary valid JSON values are preserved: parsing is not authentication or the
+login reader's exact-field/string validation. **Native JSON.parse still collapses
+duplicate decoded keys; rejecting them remains pending BS3-F2 and an activation
+prerequisite**, alongside attempt controls.
+
+Future activation requires early no-store → request admission → this reader →
+handler, before/bypassing default parsers. Module-only placement after a global
+parser is insufficient. No main/AppModule, route or frontend registration occurs.
+Isolated HTTP tests prove owned synthetic loopback behavior, including rejection
+before client end; not real NINA/browser/TLS/proxy/deployment protection. Node or
+proxy framing errors before middleware cannot promise its no-store header. The
+clinical block, null backend expiry, strict consumed-refresh denial and pending
+canonical origin/TLS/LAN ingress/authorization requirements remain unchanged.
+
 ## Internal access credentials (not registered or exposed)
 
 `AccessCredentialService` is constructor-configured and unregistered. Its
