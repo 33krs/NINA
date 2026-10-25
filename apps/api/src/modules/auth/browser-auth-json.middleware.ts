@@ -8,6 +8,44 @@ export interface BrowserAuthJsonLimits {
   readonly readTimeoutMs: number;
 }
 
+/** Inspect only syntax already accepted by JSON.parse; never parse a JSON grammar. */
+function hasUniqueObjectKeys(text: string): boolean {
+  const objects: Set<string>[] = [];
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index];
+    if (character === '{') objects.push(new Set<string>());
+    else if (character === '}') objects.pop();
+    else if (character === '"') {
+      const start = index;
+      index++;
+      while (index < text.length) {
+        if (text[index] === '\\') index += 2;
+        else if (text[index] === '"') break;
+        else index++;
+      }
+      const end = index + 1;
+      let following = end;
+      while (
+        text[following] === ' ' ||
+        text[following] === '\t' ||
+        text[following] === '\r' ||
+        text[following] === '\n'
+      )
+        following++;
+      // In valid JSON only an object key string is followed by a colon.
+      if (text[following] === ':') {
+        const key = JSON.parse(text.slice(start, end)) as string;
+        const keys = objects[objects.length - 1];
+        if (!keys || keys.has(key)) return false;
+        keys.add(key);
+      }
+      // Consume this token's whitespace once, without skipping its next delimiter.
+      index = following - 1;
+    }
+  }
+  return true;
+}
+
 /** Unregistered: mount after no-store/admission, before any other body reader. */
 export function createBrowserAuthJson(
   limits: BrowserAuthJsonLimits,
@@ -87,8 +125,10 @@ export function createBrowserAuthJson(
       try {
         const bytes = Buffer.concat(chunks, received);
         if (!isUtf8(bytes)) return reject(400);
-        // Native parsing rejects empty/BOM/trailing input, but collapses duplicate keys (F2).
-        body = JSON.parse(bytes.toString('utf8')) as unknown;
+        const text = bytes.toString('utf8');
+        // Keep the original text: native parsing alone loses overwritten keys.
+        body = JSON.parse(text) as unknown;
+        if (!hasUniqueObjectKeys(text)) return reject(400);
       } catch {
         return reject(400);
       }

@@ -233,10 +233,21 @@ DoS protection or an ingress/header-timeout policy.
 
 Complete bounded bytes must pass `isUtf8` before UTF-8 decoding and JSON.parse.
 Empty, BOM-prefixed, malformed and trailing-junk JSON is rejected without repair.
-Arbitrary valid JSON values are preserved: parsing is not authentication or the
-login reader's exact-field/string validation. **Native JSON.parse still collapses
-duplicate decoded keys; rejecting them remains pending BS3-F2 and an activation
-prerequisite**, alongside attempt controls.
+Before publishing the parsed body or continuing, an iterative lexical scan of the
+original text rejects repeated decoded keys within each object with generic 400.
+Native JSON.parse remains the syntax authority and decodes each complete key
+token; escaped equivalents collide, including nested objects inside arrays.
+Object-local sets avoid prototype-name hazards and allow keys repeated across
+different objects. String escapes and punctuation inside values do not create
+keys. Comparison does not normalize Unicode, case or surrogate code units.
+
+The scanner does not recursively parse a JSON grammar or reparse subtrees. Its
+traversal and auxiliary storage are bounded by source size; parsing, decoded
+strings, sets and concurrency still consume resources. The read deadline bounds
+asynchronous body reading, not synchronous parsing/scanning or total CPU time.
+All other valid JSON values are preserved: parsing is not authentication or the
+login reader's exact-field/string validation. Attempt controls and the other
+activation requirements below remain pending.
 
 Future activation requires early no-store → request admission → this reader →
 handler, before/bypassing default parsers. Module-only placement after a global
