@@ -107,6 +107,50 @@ describe('bounded JSON lifecycle', () => {
     expect(jest.getTimerCount()).toBe(0);
     fixture.request.destroy();
   });
+  it('cleans duplicate rejection without publishing a body or late continuation', () => {
+    jest.useFakeTimers();
+    const fixture = direct();
+    const foreignListener = jest.fn();
+    fixture.request.on('aborted', foreignListener);
+    fixture.invoke();
+    fixture.request.emit('data', Buffer.from('{"x":1,"x":2}'));
+    fixture.request.emit('end');
+    fixture.request.emit('data', Buffer.from('{}'));
+    fixture.request.emit('end');
+    jest.runAllTimers();
+    expect(fixture.response.statusCode).toBe(400);
+    expect(Object.hasOwn(fixture.request, 'body')).toBe(false);
+    expect(fixture.next).not.toHaveBeenCalled();
+    expect(fixture.request.listeners('aborted')).toEqual([foreignListener]);
+    for (const event of ['data', 'end', 'error', 'close'])
+      expect(fixture.request.listenerCount(event)).toBe(0);
+    expect(fixture.response.listenerCount('finish')).toBe(0);
+    expect(fixture.response.listenerCount('close')).toBe(0);
+    expect(jest.getTimerCount()).toBe(0);
+    fixture.request.destroy();
+  });
+  it('preserves deeply nested objects and arrays without recursive scanning', () => {
+    const depth = 10000;
+    const text = '{"x":['.repeat(depth) + '0' + ']}'.repeat(depth);
+    const fixture = direct({
+      maxBytes: Buffer.byteLength(text),
+      readTimeoutMs: READ_MS,
+    });
+    fixture.invoke();
+    fixture.request.emit('data', Buffer.from(text));
+    fixture.request.emit('end');
+    expect(fixture.next).toHaveBeenCalledTimes(1);
+    let value: unknown = fixture.request.body;
+    for (let index = 0; index < depth; index++) {
+      expect(value).not.toBeNull();
+      expect(typeof value).toBe('object');
+      const array: unknown = (value as Record<string, unknown>).x;
+      expect(Array.isArray(array)).toBe(true);
+      value = (array as unknown[])[0];
+    }
+    expect(value).toBe(0);
+    fixture.request.destroy();
+  });
   it.each(['body', 'encoded', 'consumed', 'paused', 'destroyed'])(
     'rejects %s input without a second reader',
     (mode) => {
@@ -300,15 +344,7 @@ describe('strict bounded JSON over isolated HTTP', () => {
   });
   afterAll(async () => app?.close());
 
-  it.each([
-    '{}',
-    'null',
-    'false',
-    '0',
-    '"synthetic"',
-    '[1,{"x":true}]',
-    '{"x":1,"x":2}',
-  ])(
+  it.each(['{}', 'null', 'false', '0', '"synthetic"', '[1,{"x":true}]'])(
     'preserves valid JSON %s without authentication or response echo',
     async (body) => {
       const result = await send(body);
@@ -316,6 +352,75 @@ describe('strict bounded JSON over isolated HTTP', () => {
       expect(result.cache).toBe('no-store');
       expect(result.body).toBe('{"accepted":true}');
       expect(seen).toEqual([JSON.parse(body)]);
+    },
+  );
+  it.each([
+    '{"x":1,"x":2}',
+    '{"x":1,"x":1}',
+    '{"":1,"":2}',
+    String.raw`{"x":1,"\u0078":2}`,
+    String.raw`{"\u0078":1,"\u0078":2}`,
+    '{"a":{"x":1,"x":2}}',
+    '[0,{"a":[{"x":1,"x":2}]}]',
+    String.raw`{"\"":1,"\u0022":2}`,
+    String.raw`{"\\":1,"\u005c":2}`,
+    String.raw`{"\n":1,"\u000a":2}`,
+    String.raw`{"/":1,"\/":2}`,
+    String.raw`{"😀":1,"\ud83d\ude00":2}`,
+    String.raw`{"\ud800":1,"\uD800":2}`,
+    String.raw`{"\udc00":1,"\uDC00":2}`,
+    '{"__proto__":1,"__proto__":2}',
+    '{"constructor":1,"constructor":2}',
+    '{"x" \r\n\t:1,"x":2}',
+  ])(
+    'rejects duplicate decoded keys without exposing input %#',
+    async (body) => {
+      expect(Buffer.byteLength(body)).toBeLessThanOrEqual(MAX_BYTES);
+      const result = await send(body);
+      expect({ status: result.status, calls: seen.length }).toEqual({
+        status: 400,
+        calls: 0,
+      });
+      assertRejected(result, 400);
+      expect(Object.hasOwn(serverRequest, 'body')).toBe(false);
+    },
+  );
+  it.each([
+    '{"x":{"x":1},"a":{"x":2}}',
+    '[{"x":1},{"x":2},["x","x"]]',
+    '{"__proto__":1,"constructor":2,"toString":3}',
+    '{"X":1,"x":2}',
+    String.raw`{"é":1,"e\u0301":2}`,
+    String.raw`{"\ud800":1,"\udc00":2}`,
+    String.raw`{"x":"{\"x\":1,\"x\":2}","a":"\\\"}[:"}`,
+    String.raw`["{", "}", "x", "x", "\\", "\"", ":"]`,
+    '{"\\u0078" \r: "x"}',
+    '[]',
+    '-0',
+    '1e400',
+  ])('preserves distinct keys and string syntax %#', async (body) => {
+    expect(Buffer.byteLength(body)).toBeLessThanOrEqual(MAX_BYTES);
+    const result = await send(body);
+    expect(result.status).toBe(202);
+    expect(result.cache).toBe('no-store');
+    expect(seen).toEqual([JSON.parse(body)]);
+  });
+  it.each([true, false])(
+    'handles a decoded key escape split across actual HTTP chunks (duplicate=%s)',
+    async (duplicate) => {
+      const observed = new Promise<void>((resolve) => {
+        firstChunk = resolve;
+      });
+      const exchange = open({ 'Transfer-Encoding': 'chunked' });
+      exchange.client.write('{"x":1,"\\u00');
+      await observed;
+      exchange.client.end(duplicate ? '78":2}' : '79":2}');
+      const result = await exchange.result;
+      if (duplicate) assertRejected(result, 400);
+      else {
+        expect(result.status).toBe(202);
+        expect(seen).toEqual([{ x: 1, y: 2 }]);
+      }
     },
   );
   it.each(['identity', 'IdEnTiTy'])(
