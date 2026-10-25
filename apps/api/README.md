@@ -342,10 +342,22 @@ logout and accepted clinical resource permissions remain separate requirements.
 
 `AccessCredentialService` is constructor-configured and unregistered. Its
 `issue(sessionId, ownerId, authVersion)` first requires successful online
-`SessionService.validate`; `verify(token)` verifies the signature and strict
-header/claims before a new online check and returns the **current** account
-identity. Errors or online denial return `null`, with no supplied values logged.
-Invalid configuration throws only a generic configuration error.
+`SessionService.validate`. `verifySession(token)` is the single verification
+pipeline: it verifies the signature and strict header/claims before a fresh online
+check, then returns `{ sessionId, account }`. The session ID comes from the
+verified signed `sid`; the account is the **current** online identity, not token
+roles or client-supplied identity. `verify(token)` calls this same pipeline and
+projects only the account, preserving its account-only API and `null` failures.
+Each invocation performs its own online validation without cached authorization.
+Errors or online denial return `null`, with no supplied values logged. Invalid
+configuration throws only a generic configuration error.
+
+The exported `VerifiedAccessSession` interface has readonly `sessionId` and
+`account` fields. This is a TypeScript contract, not runtime freezing, a guarantee
+against concurrent revocation, or permission to revoke a session. No unverified
+JWT decoding, second verifier or authentication bypass is introduced. The result
+supports later owner-bound operations; it does not implement logout, select an
+expired-access logout policy, register a route/provider, or grant clinical access.
 
 Callers must explicitly supply matching local RSA private/public `KeyObject`s
 with at least 2048-bit moduli, exact issuer/audience strings, and an integer
@@ -368,9 +380,13 @@ sessions still fail online validation even with a cryptographically valid token.
 Issuance/verification adds no renewal, recovery, or uninterrupted-access promise.
 The temporary clinical block above remains intact: no browser login, HTTP
 transport, cookie policy, module registration, or clinical access is activated.
-Deterministic tests use ephemeral keys, fake time and session doubles; existing
-session tests independently cover nullable expiry. No live database proof is
-claimed by these credential tests.
+Deterministic tests use ephemeral keys, fake time and session doubles. Both
+verification APIs share the malformed-input, signature, header and claim denial
+matrices. Tests also cover account-only compatibility, current identity/version
+and revocation denials, post-await token expiry/clock rollback, and independent
+concurrent session/owner results. Existing session tests independently cover
+nullable expiry. No live database, HTTP, browser or logout proof is claimed by
+these credential tests.
 
 ## Local account password hashing foundation (not exposed)
 

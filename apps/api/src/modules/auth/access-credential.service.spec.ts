@@ -14,6 +14,7 @@ import {
   type AccessCredentialConfig,
 } from './access-credential.service';
 import type { SessionService } from './session.service';
+import type { AuthenticatedAccount } from './credential-authentication.service';
 
 const SID = '11111111-1111-4111-8111-111111111111';
 const OWNER = '22222222-2222-4222-8222-222222222222';
@@ -85,6 +86,11 @@ describe('AccessCredentialService (internal only)', () => {
   });
   afterEach(() => jest.useRealTimers());
 
+  async function expectVerificationDenied(token: unknown): Promise<void> {
+    expect(await service.verify(token)).toBeNull();
+    expect(await service.verifySession(token)).toBeNull();
+  }
+
   it('issues a minimal signed credential only after online validation', async () => {
     const token = await service.issue(SID, OWNER, 2);
     expect(token).toEqual(expect.any(String));
@@ -106,6 +112,18 @@ describe('AccessCredentialService (internal only)', () => {
   it('returns the current online identity rather than token identity claims', async () => {
     expect(await service.verify(signed())).toEqual(current);
     expect(validate).toHaveBeenCalledWith(SID, OWNER, 2);
+  });
+
+  it('returns the verified session binding while preserving the account-only API', async () => {
+    const token = signed();
+    expect(await service.verifySession(token)).toStrictEqual({
+      sessionId: SID,
+      account: current,
+    });
+    expect(validate).toHaveBeenCalledTimes(1);
+    expect(validate).toHaveBeenLastCalledWith(SID, OWNER, 2);
+    expect(await service.verify(token)).toStrictEqual(current);
+    expect(validate).toHaveBeenCalledTimes(2);
   });
 
   it.each([1, 900])(
@@ -161,13 +179,13 @@ describe('AccessCredentialService (internal only)', () => {
   });
 
   it.each([null, new Error('private infrastructure detail')])(
-    'denies both operations on online failure %p',
+    'denies issuance and both verification APIs on online failure %p',
     async (failure) => {
       if (failure instanceof Error) validate.mockRejectedValue(failure);
       else validate.mockResolvedValue(null);
       expect(await service.issue(SID, OWNER, 2)).toBeNull();
-      expect(await service.verify(signed())).toBeNull();
-      expect(validate).toHaveBeenCalledTimes(2);
+      await expectVerificationDenied(signed());
+      expect(validate).toHaveBeenCalledTimes(3);
     },
   );
 
@@ -183,6 +201,79 @@ describe('AccessCredentialService (internal only)', () => {
     expect(await service.verify(token)).toEqual(changed);
     expect(await service.verify(token)).toBeNull();
   });
+
+  it('rechecks current identity, authentication version and revocation for each session result', async () => {
+    let account: AuthenticatedAccount = current;
+    let revoked = false;
+    validate.mockImplementation(async (_sid, _owner, version) =>
+      !revoked && version === account.authVersion ? account : null,
+    );
+    const token = signed();
+    expect(await service.verifySession(token)).toStrictEqual({
+      sessionId: SID,
+      account: current,
+    });
+    account = { ...current, username: 'renamed', role: 'INSTRUCTOR' };
+    expect(await service.verifySession(token)).toStrictEqual({
+      sessionId: SID,
+      account,
+    });
+    account = { ...account, authVersion: 3 };
+    expect(await service.verifySession(token)).toBeNull();
+    account = current;
+    revoked = true;
+    expect(await service.verifySession(token)).toBeNull();
+    expect(validate).toHaveBeenCalledTimes(4);
+    for (const call of validate.mock.calls)
+      expect(call).toEqual([SID, OWNER, 2]);
+  });
+
+  it('keeps concurrent verified session and owner results isolated', async () => {
+    const secondSid = '33333333-3333-4333-8333-333333333333';
+    const secondAccount = {
+      ...current,
+      id: '44444444-4444-4444-8444-444444444444',
+      authVersion: 3,
+    };
+    const releases = new Map<
+      unknown,
+      (account: AuthenticatedAccount | null) => void
+    >();
+    validate.mockImplementation(
+      (sid) => new Promise((resolve) => releases.set(sid, resolve)),
+    );
+    const first = service.verifySession(signed());
+    const second = service.verifySession(
+      crafted({
+        ...claims(),
+        sid: secondSid,
+        sub: secondAccount.id,
+        authVersion: secondAccount.authVersion,
+      }),
+    );
+    expect(validate).toHaveBeenNthCalledWith(1, SID, OWNER, 2);
+    expect(validate).toHaveBeenNthCalledWith(2, secondSid, secondAccount.id, 3);
+    releases.get(secondSid)!(secondAccount);
+    expect(await second).toStrictEqual({
+      sessionId: secondSid,
+      account: secondAccount,
+    });
+    releases.get(SID)!(current);
+    expect(await first).toStrictEqual({ sessionId: SID, account: current });
+    expect(validate).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([NOW + 60, NOW - 1])(
+    'denies a session result when time moves to %i during online validation',
+    async (settledTime) => {
+      validate.mockImplementationOnce(async () => {
+        jest.setSystemTime(settledTime * 1000);
+        return current;
+      });
+      expect(await service.verifySession(signed())).toBeNull();
+      expect(validate).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('denies expiry reached while awaiting the session check', async () => {
     validate.mockImplementationOnce(async () => {
@@ -205,9 +296,13 @@ describe('AccessCredentialService (internal only)', () => {
     const token = signed();
     jest.setSystemTime((NOW + 60) * 1000 - 1);
     expect(await service.verify(token)).toEqual(current);
+    expect(await service.verifySession(token)).toStrictEqual({
+      sessionId: SID,
+      account: current,
+    });
     validate.mockClear();
     jest.setSystemTime((NOW + 60) * 1000);
-    expect(await service.verify(token)).toBeNull();
+    await expectVerificationDenied(token);
     expect(validate).not.toHaveBeenCalled();
   });
 
@@ -225,7 +320,7 @@ describe('AccessCredentialService (internal only)', () => {
   ])(
     'rejects malformed or bounded input case %# without online work',
     async (token) => {
-      expect(await service.verify(token)).toBeNull();
+      await expectVerificationDenied(token);
       expect(validate).not.toHaveBeenCalled();
     },
   );
@@ -250,7 +345,7 @@ describe('AccessCredentialService (internal only)', () => {
     async (name) => {
       const payload = claims();
       delete payload[name];
-      expect(await service.verify(crafted(payload))).toBeNull();
+      await expectVerificationDenied(crafted(payload));
       expect(validate).not.toHaveBeenCalled();
     },
   );
@@ -282,9 +377,7 @@ describe('AccessCredentialService (internal only)', () => {
   ])(
     'denies invalid/extra claim %s=%p before online validation',
     async (name, value) => {
-      expect(
-        await service.verify(crafted({ ...claims(), [name]: value })),
-      ).toBeNull();
+      await expectVerificationDenied(crafted({ ...claims(), [name]: value }));
       expect(validate).not.toHaveBeenCalled();
     },
   );
@@ -305,7 +398,7 @@ describe('AccessCredentialService (internal only)', () => {
   ])(
     'denies unexpected protected header %p before online validation',
     async (header) => {
-      expect(await service.verify(crafted(claims(), header))).toBeNull();
+      await expectVerificationDenied(crafted(claims(), header));
       expect(validate).not.toHaveBeenCalled();
     },
   );
@@ -327,7 +420,7 @@ describe('AccessCredentialService (internal only)', () => {
       hmac,
       `${parts[0]}.${parts[1]}.`,
     ]) {
-      expect(await service.verify(token)).toBeNull();
+      await expectVerificationDenied(token);
     }
     expect(validate).not.toHaveBeenCalled();
   });
@@ -335,7 +428,7 @@ describe('AccessCredentialService (internal only)', () => {
   it.each([null, 'payload', [], 42])(
     'denies nonobject payload %p',
     async (payload) => {
-      expect(await service.verify(crafted(payload))).toBeNull();
+      await expectVerificationDenied(crafted(payload));
       expect(validate).not.toHaveBeenCalled();
     },
   );
