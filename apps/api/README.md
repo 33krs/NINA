@@ -297,6 +297,47 @@ pre-parser production wiring, server/proxy limits, login-attempt controls and
 whole-application negative proof. Scrypt queue bounds are not throttling. Resume,
 voluntary logout, frontend and accepted clinical permissions remain separate.
 
+## Isolated browser refresh composition (not registered or exposed)
+
+`createBrowserRefreshHandler(services, config)` composes typed rotation/access
+ports with explicit canonical HTTPS origin, JSON byte/read-deadline limits and
+cookie ages. It registers no route, changes no existing service or clinical
+guard, and reads no environment/default credentials. Mount it before other body
+readers only when production activation is separately authorized.
+
+The order is no-store → exact POST/Origin/public-CSRF-marker admission → bounded
+duplicate-safe JSON → empty object `{}` → strict cookie extraction → one rotation
+→ online session-bound access issuance → complete cookie-pair serialization.
+Refresh-only requests work without a current access credential; a malformed
+companion access cookie still rejects the entire envelope. There is no credential
+or identity fallback from the body, query, Authorization header or access token.
+Success is empty HTTP 204 with two separate Secure/HttpOnly/SameSite=Strict,
+host-only cookie fields, never credentials, session IDs or identity in JSON/logs.
+
+Admission returns generic 403; nonempty/nonobject JSON returns 400; missing or
+malformed refresh cookies and rotation denial return 401. The existing body
+reader retains 400/408/413/415. Dependency throws, issuance failure and cookie
+serialization/header failures return generic 500 where writable. Application
+responses are no-store; rejection closes without unbounded draining. Disconnected
+clients and pre-application Node/proxy failures may receive nothing.
+
+Serialize both cookie fields before setting either. Before dispatch failure,
+remove any buffered credential fields or destroy the response if removal fails.
+After dispatch is attempted, even a thrown write has an ambiguous outcome.
+Unlike new-session login cleanup, refresh never compensates an existing session:
+no automatic session/family/account revocation, retry, stale acceptance, grace or
+successor recovery. A rotation commit followed by issuance failure or a lost
+response can strand the browser; neither null nor failure proves rollback.
+Explicit null backend expiry and voluntary logout remain unchanged; finite access
+and cookie ages do not impose time/idle forced login or permanent browser storage.
+
+`browser-refresh.http.spec.ts` uses parser-disabled tiny Nest, owned loopback,
+ephemeral RSA keys and typed doubles, including stateful rotation doubles. These
+prove HTTP ordering/denial/failure isolation, not live PostgreSQL races, rollback,
+TLS or actual browser storage. Production HTTPS/trusted ingress, pre-parser
+wiring/limits/attempt controls, frontend single-flight refresh, verified-session
+logout and accepted clinical resource permissions remain separate requirements.
+
 ## Internal access credentials (not registered or exposed)
 
 `AccessCredentialService` is constructor-configured and unregistered. Its
