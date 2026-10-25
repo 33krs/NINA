@@ -258,6 +258,45 @@ proxy framing errors before middleware cannot promise its no-store header. The
 clinical block, null backend expiry, strict consumed-refresh denial and pending
 canonical origin/TLS/LAN ingress/authorization requirements remain unchanged.
 
+## Isolated browser login composition (not registered or exposed)
+
+`createBrowserLoginHandler(services, config)` composes the existing protections;
+it registers no route and leaves the clinical block unchanged. Supply typed
+creation/access/revocation ports and explicit canonical HTTPS origin, JSON byte
+and read-deadline limits, and access/refresh cookie ages. Existing constructors
+validate and copy configuration; there are no environment reads or defaults.
+
+The boundary runs no-store → exact POST/Origin/public-CSRF-marker admission →
+bounded duplicate-safe JSON → exact login-input extraction →
+`create(username, password, null)` → session-bound access issuance → complete
+cookie-pair serialization. Success is empty HTTP 204 with two separate Secure,
+HttpOnly, SameSite=Strict, host-only cookie fields. No credentials, session IDs
+or identity are returned in JSON or logged. Backend expiry remains explicit null;
+finite access-token/cookie retention is not a time/idle forced-login policy.
+
+Admission returns generic 403 before reading the body or calling services;
+invalid login shape returns 400, creation denial 401, and internal failure 500.
+The body reader retains its generic 400/408/413/415 responses. Application-handled
+responses are no-store; rejected connections close without unbounded draining.
+Disconnected clients and pre-application Node/proxy failures may receive nothing.
+
+Only a known-created, not-yet-dispatched session gets one best-effort owner-scoped
+revocation attempt after issuance/serialization failure or lost response. Buffered
+cookies are removed before cleanup, or the response is destroyed if removal fails.
+Creation null/throw can hide an ambiguous commit: never invent an ID or retry.
+Cleanup false/throw proves no rollback. Once dispatch is attempted, delivery is
+ambiguous, even if the write throws: no automatic revocation on later socket close,
+retry, refresh grace, family/account revocation or uninterrupted-access promise.
+
+`browser-login.http.spec.ts` uses only a tiny parser-disabled Nest application,
+owned loopback clients, ephemeral RSA keys and typed service doubles. It checks
+successful online validation, admission/body rejection, failure cleanup,
+disconnects and concurrent isolation; it is not actual NINA/browser/TLS/database
+or deployment proof. Activation still needs canonical HTTPS/trusted ingress,
+pre-parser production wiring, server/proxy limits, login-attempt controls and
+whole-application negative proof. Scrypt queue bounds are not throttling. Resume,
+voluntary logout, frontend and accepted clinical permissions remain separate.
+
 ## Internal access credentials (not registered or exposed)
 
 `AccessCredentialService` is constructor-configured and unregistered. Its
