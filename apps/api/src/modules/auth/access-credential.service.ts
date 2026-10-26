@@ -3,6 +3,11 @@ import * as jwt from 'jsonwebtoken';
 import type { AuthenticatedAccount } from './credential-authentication.service';
 import type { SessionService } from './session.service';
 
+export interface VerifiedAccessSession {
+  readonly sessionId: string;
+  readonly account: AuthenticatedAccount;
+}
+
 export interface AccessCredentialConfig {
   readonly privateKey: KeyObject;
   readonly publicKey: KeyObject;
@@ -126,6 +131,10 @@ export class AccessCredentialService {
   }
 
   async verify(token: unknown): Promise<AuthenticatedAccount | null> {
+    return (await this.verifySession(token))?.account ?? null;
+  }
+
+  async verifySession(token: unknown): Promise<VerifiedAccessSession | null> {
     if (
       typeof token !== 'string' ||
       token.length === 0 ||
@@ -167,7 +176,7 @@ export class AccessCredentialService {
       );
       // Online validation may await beyond expiry; no stale success is returned.
       return account && this.isCurrent(payload.iat, payload.exp)
-        ? account
+        ? { sessionId: payload.sid, account }
         : null;
     } catch {
       return null;
