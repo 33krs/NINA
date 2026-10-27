@@ -570,6 +570,43 @@ in-flight cancellation guarantee, session lifetime policy or transport is added.
 Isolated typed revocation doubles preserve validation's no-write tests; these
 checks do not prove live PostgreSQL rollback, concurrency or isolation.
 
+## Internal refresh-authenticated session revocation (not registered or exposed)
+
+`RefreshSessionRevocationService.revoke(refreshToken, expectedBinding?)` authenticates
+the current refresh credential and revokes only its linked owner-bound session in
+one bounded Serializable transaction (`maxWait=2000`, `timeout=5000`). It accepts
+only canonical 43-character/32-byte base64url input and looks up its SHA-256 digest.
+The minimal selection reads token/session IDs, lifecycle timestamps, account ID,
+activity and authentication versions; it does not select usernames, roles or
+password hashes. Unconsumed/unrevoked state, exact linkage, current activity/version,
+creation ordering and matching null-or-finite future expiry are required.
+
+An omitted second argument permits refresh-only authentication. A supplied
+`VerifiedAccessSession` constrains session ID, account ID and version only; those
+values are snapshotted before awaits, never select the lookup or replace refresh
+authentication. A supplied malformed constraint, including explicit `undefined`,
+denies rather than being ignored. No JWT decoding or access verification occurs
+here; the caller must already have verified any supplied access binding.
+
+The operation conditionally consumes only the presented token, then conditionally
+revokes only the matched session; each update must affect exactly one row. Count
+failure or invalid time after an await throws inside the transaction callback to
+request abort rather than commit partial consumption. Captured numeric expiry and
+owner/version state resist caller/double mutation across awaits. The clock must
+remain finite, Date-representable and nondecreasing during the operation. True is
+returned only after transaction settlement and a final time/expiry check. False
+or a caught dependency/serialization/commit failure does not establish rollback
+or whether revocation took effect; no retry is attempted. A failed post-settlement
+time check cannot undo an already committed operation.
+
+No successor, random credential, rotation, issuance, account-version write,
+family/all-session or other-token mutation occurs. Explicit null backend expiry,
+consumed-token denial and the clinical block stay unchanged. This internal class
+activates no provider, HTTP/logout route, cookie deletion, frontend or deployment.
+Typed Prisma doubles prove checks, scoped calls, callback-abort intent and awaited
+settlement, not actual PostgreSQL rollback, contention, latest-at-return account
+state or in-flight cancellation. Real owned-database service proof remains separate.
+
 ## Internal refresh rotation (not registered or exposed)
 
 `RefreshRotationService.rotate(refreshToken)` accepts only canonical 32-byte
