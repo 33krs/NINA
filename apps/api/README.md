@@ -825,9 +825,9 @@ they do not establish PostgreSQL syntax, child-close, cleanup, or runtime proof.
 Run the ordinary API checks with `npm --workspace @nina/api test` and
 `npm --workspace @nina/api run lint`.
 
-Pull requests and pushes to `feature/appointments` run the API checks and the
-isolated PostgreSQL 15 regression suite in GitHub Actions. CI uses a temporary
-hosted runner and pulls the test image there; the local suite below still
+All pull requests and pushes to both `feature/appointments` and `main` run the API
+checks and the isolated PostgreSQL 15 regression suite in GitHub Actions. CI uses
+a temporary hosted runner and pulls the test image there; the local suite below still
 requires `postgres:15-alpine` to be present before running.
 
 ## Odontogram PostgreSQL 15 regression
