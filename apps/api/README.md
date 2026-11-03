@@ -607,6 +607,40 @@ Typed Prisma doubles prove checks, scoped calls, callback-abort intent and await
 settlement, not actual PostgreSQL rollback, contention, latest-at-return account
 state or in-flight cancellation. Real owned-database service proof remains separate.
 
+### Isolated PostgreSQL revocation proof
+
+Run only with permission to create disposable local Docker resources:
+
+```sh
+node apps/api/scripts/verify-odontogram-postgres.cjs --suite=auth-session-revocation
+```
+
+Run from the repository root. The explicit auth branch applies **all existing
+migrations**, generates a temporary Prisma client, and runs only
+`src/modules/auth/refresh-session-revocation.live.spec.ts` (17 scenarios).
+Ordinary Jest runs skip this suite without creating a client. No application
+schema, HTTP registration or deployment settings are changed.
+
+The runner requires an **already cached** `postgres:15-alpine` image; it never
+pulls one. It uses generated ephemeral SCRAM credentials in private temporary
+files, a dedicated labelled Docker network with one container, a loopback-only
+port, tmpfs database storage and owned-resource cleanup. Ambient database URLs
+and credential/session environment variables are not inherited. This is resource
+isolation, **not an air-gap or a claim that network egress is disabled**.
+
+Actual revocation and rotation services use independent real Prisma clients.
+The proof covers null/finite expiry, state and binding denials, owner/session
+and sibling-token isolation, double logout, and rotation/logout in both lock
+orders. Server-side advisory/row-lock barriers plus identified backend blocking
+evidence establish contention before release; sleeps only poll that evidence.
+A session-update trigger verifies the prior token claim, records its observation
+through a nontransactional sequence, then raises to prove durable rollback.
+A separate injected lost-settlement acknowledgement follows an actual committed
+transaction: denial can coexist with committed consumption/revocation. That is
+**not a real disconnect test**, and denial never promises rollback, retry safety,
+or uninterrupted access. These checks do not establish browser/HTTP/TLS behavior,
+latest-at-return revocation visibility, or in-flight cancellation.
+
 ## Internal refresh rotation (not registered or exposed)
 
 `RefreshRotationService.rotate(refreshToken)` accepts only canonical 32-byte
