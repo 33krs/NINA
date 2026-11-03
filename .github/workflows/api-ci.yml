@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - feature/appointments
+      - main
 
 permissions:
   contents: read
