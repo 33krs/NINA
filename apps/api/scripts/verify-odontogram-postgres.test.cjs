@@ -7,6 +7,7 @@ const { spawn } = require('node:child_process');
 const {
   dockerArgs,
   parseSuite,
+  jestScenario,
   prepareIsolatedClient,
   writePostgresEnvironment,
   copyMigrationStage,
@@ -130,6 +131,8 @@ for (const [signal, phase, exitCode, options = {}] of [
   ['SIGTERM', 'start', 143, { suite: 'pharmacy-ledger' }],
   ['SIGINT', 'create', 130, { suite: 'pharmacy-dispensing' }],
   ['SIGTERM', 'start', 143, { suite: 'pharmacy-dispensing' }],
+  ['SIGINT', 'create', 130, { suite: 'auth-session-revocation' }],
+  ['SIGTERM', 'start', 143, { suite: 'auth-session-revocation' }],
 ]) {
   const scenario = options.cleanup
     ? 'during cleanup preserves resource removal'
@@ -1255,4 +1258,36 @@ test('copied-schema generation succeeds offline without installer or network exe
     fs.rmSync(root, { recursive: true, force: true });
   }
   assert.equal(fs.existsSync(root), false);
+});
+
+test('auth suite selects only its exact real-service proof and all migrations', () => {
+  assert.equal(
+    parseSuite(['--suite=auth-session-revocation']),
+    'auth-session-revocation',
+  );
+  assert.deepEqual(jestScenario('auth-session-revocation'), {
+    testPath: 'src/modules/auth/refresh-session-revocation.live.spec.ts',
+    expectedTests: 17,
+  });
+  assert.deepEqual(jestScenario('odontogram'), {
+    testPath: 'src/modules/odontogram/odontogram.live.spec.ts',
+    expectedTests: 4,
+  });
+  assert.throws(
+    () => jestScenario('pharmacy-ledger'),
+    /Unsupported Jest suite/,
+  );
+  assert.throws(() => jestScenario('unknown'), /Unsupported Jest suite/);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nina-auth-migrations-'));
+  try {
+    const apiRoot = path.resolve(__dirname, '..');
+    copyMigrationStage(apiRoot, root, false, 'auth-session-revocation');
+    const migrationNames = (directory) => fs.readdirSync(directory).sort();
+    assert.deepEqual(
+      migrationNames(path.join(root, 'prisma', 'migrations')),
+      migrationNames(path.join(apiRoot, 'prisma', 'migrations')),
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

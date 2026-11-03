@@ -201,8 +201,10 @@ function parseSuite(args) {
     return 'pharmacy-ledger';
   if (args.length === 1 && args[0] === '--suite=pharmacy-dispensing')
     return 'pharmacy-dispensing';
+  if (args.length === 1 && args[0] === '--suite=auth-session-revocation')
+    return 'auth-session-revocation';
   throw new Error(
-    'Unsupported arguments: use no arguments, --suite=pharmacy-ledger or --suite=pharmacy-dispensing',
+    'Unsupported arguments: use no arguments, --suite=pharmacy-ledger, --suite=pharmacy-dispensing or --suite=auth-session-revocation',
   );
 }
 
@@ -585,7 +587,12 @@ function copyMigrationStage(
       suite !== 'odontogram'
         ? '20261010140000_add_prescription_dispensing'
         : '20261010130000_add_odontogram_history';
-    if (!includeHistory && name === omitted) continue;
+    if (
+      suite !== 'auth-session-revocation' &&
+      !includeHistory &&
+      name === omitted
+    )
+      continue;
     fs.cpSync(
       path.join(source, 'migrations', name),
       path.join(target, 'migrations', name),
@@ -593,6 +600,20 @@ function copyMigrationStage(
     );
   }
   return path.join(target, 'schema.prisma');
+}
+
+function jestScenario(suite) {
+  if (suite === 'auth-session-revocation')
+    return {
+      testPath: 'src/modules/auth/refresh-session-revocation.live.spec.ts',
+      expectedTests: 17,
+    };
+  if (suite === 'odontogram')
+    return {
+      testPath: 'src/modules/odontogram/odontogram.live.spec.ts',
+      expectedTests: 4,
+    };
+  throw new Error('Unsupported Jest suite');
 }
 
 function proofAuth(suite) {
@@ -611,7 +632,9 @@ function assertProof(proof) {
 async function main() {
   const suite = parseSuite(process.argv.slice(2));
   const dispensing = suite === 'pharmacy-dispensing';
-  const pharmacy = suite !== 'odontogram';
+  const pharmacy = suite === 'pharmacy-ledger' || dispensing;
+  const auth = suite === 'auth-session-revocation';
+  const scram = pharmacy || auth;
   const apiRoot = path.resolve(__dirname, '..');
   const runId = crypto.randomUUID();
   const name = `nina-odontogram-pg15-${runId.slice(0, 12)}`;
@@ -621,10 +644,10 @@ async function main() {
   const proofFile = path.join(tempRoot, 'container-proof.json');
   const database = `nina_${runId.replaceAll('-', '').slice(0, 16)}`;
   const user = `nina_${runId.replaceAll('-', '').slice(16, 28)}`;
-  const password = pharmacy ? crypto.randomBytes(32).toString('hex') : '';
+  const password = scram ? crypto.randomBytes(32).toString('hex') : '';
   const redactions = [password];
-  const url = `postgresql://${user}${pharmacy ? ':' + password : ''}@127.0.0.1:`;
-  const authArgs = pharmacy
+  const url = `postgresql://${user}${scram ? ':' + password : ''}@127.0.0.1:`;
+  const authArgs = scram
     ? ['--env-file', path.join(tempRoot, 'postgres.env')]
     : [
         '--env',
@@ -634,7 +657,7 @@ async function main() {
         '--env',
         'POSTGRES_HOST_AUTH_METHOD=trust',
       ];
-  const psqlAuth = pharmacy ? ['-h', '127.0.0.1'] : [];
+  const psqlAuth = scram ? ['-h', '127.0.0.1'] : [];
   let networkId;
   let containerId;
   let imageId;
@@ -687,7 +710,7 @@ async function main() {
   process.on('SIGTERM', signalHandler);
 
   try {
-    if (pharmacy) writePostgresEnvironment(tempRoot, database, user, password);
+    if (scram) writePostgresEnvironment(tempRoot, database, user, password);
     imageId = await docker(
       ['image', 'inspect', '--format', '{{.Id}}', IMAGE],
       commandOptions,
@@ -748,7 +771,7 @@ async function main() {
       await docker(['inspect', containerId], commandOptions),
     )[0];
     assert.equal(details.Id, containerId);
-    if (pharmacy) {
+    if (scram) {
       for (const entry of [
         'POSTGRES_HOST_AUTH_METHOD=scram-sha-256',
         'POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256',
@@ -824,7 +847,7 @@ async function main() {
       publishedPort: port,
       database,
       user,
-      auth: pharmacy ? 'isolated-scram' : 'isolated-trust',
+      auth: scram ? 'isolated-scram' : 'isolated-trust',
       baselinePatient: crypto.randomUUID(),
       baselineOdontogram: crypto.randomUUID(),
       baselineTime: '2026-01-02T03:04:05.678Z',
@@ -833,7 +856,7 @@ async function main() {
         intact: true,
       }),
     };
-    if (!pharmacy) assertProof(proof);
+    if (!scram) assertProof(proof);
     fs.writeFileSync(proofFile, JSON.stringify(proof), {
       mode: 0o600,
       flag: 'wx',
@@ -935,7 +958,7 @@ async function main() {
         ],
         commandOptions,
       );
-    if (pharmacy) {
+    if (scram) {
       assert.equal(
         await psql(
           "SELECT bool_and(auth_method = 'scram-sha-256') FROM pg_hba_file_rules WHERE type = 'host'",
@@ -943,6 +966,8 @@ async function main() {
         't',
         'all host authentication rules must use SCRAM',
       );
+    }
+    if (pharmacy) {
       if (dispensing) {
         copyMigrationStage(apiRoot, tempRoot, true, suite);
         await migrate('migrate-history');
@@ -975,35 +1000,42 @@ async function main() {
       passed = true;
       return;
     }
-    await psql(
-      `INSERT INTO "Patient" ("id","rut","firstName","lastName","dateOfBirth","updatedAt") VALUES ('${proof.baselinePatient}','synthetic-${proof.baselinePatient}','Synthetic','Verification','1990-01-01 00:00:00','2026-01-02 03:04:05.678')`,
-    );
-    await psql(
-      `INSERT INTO "Odontogram" ("id","patientId","teethStates","updatedAt") VALUES ('${proof.baselineOdontogram}','${proof.baselinePatient}','${proof.baselineJson}'::jsonb,'2026-01-02 03:04:05.678')`,
-    );
-    copyMigrationStage(apiRoot, tempRoot, true);
-    await migrate('migrate-history');
+    if (!auth) {
+      await psql(
+        `INSERT INTO "Patient" ("id","rut","firstName","lastName","dateOfBirth","updatedAt") VALUES ('${proof.baselinePatient}','synthetic-${proof.baselinePatient}','Synthetic','Verification','1990-01-01 00:00:00','2026-01-02 03:04:05.678')`,
+      );
+      await psql(
+        `INSERT INTO "Odontogram" ("id","patientId","teethStates","updatedAt") VALUES ('${proof.baselineOdontogram}','${proof.baselinePatient}','${proof.baselineJson}'::jsonb,'2026-01-02 03:04:05.678')`,
+      );
+      copyMigrationStage(apiRoot, tempRoot, true);
+      await migrate('migrate-history');
+    }
 
     const jestPackage = path.dirname(
       path.dirname(require.resolve('jest', { paths: [apiRoot] })),
     );
     const jestCli = path.join(jestPackage, 'bin', 'jest.js');
     const jestReport = path.join(tempRoot, 'jest-results.json');
+    const scenario = jestScenario(suite);
     await run(
       process.execPath,
       [
         jestCli,
         '--runInBand',
         '--runTestsByPath',
-        'src/modules/odontogram/odontogram.live.spec.ts',
+        scenario.testPath,
         '--json',
         '--outputFile',
         jestReport,
       ],
       {
         cwd: apiRoot,
-        env: isolatedEnv,
+        env: {
+          ...isolatedEnv,
+          ...(auth ? { NINA_AUTH_SESSION_REVOCATION_PG15: '1' } : {}),
+        },
         timeout: timeoutFor('jest'),
+        redactions,
         guard,
         signal: cancellation.signal,
       },
@@ -1011,8 +1043,8 @@ async function main() {
     const testSummary = JSON.parse(fs.readFileSync(jestReport, 'utf8'));
     assert.equal(
       testSummary.numPassedTests,
-      4,
-      'all four PostgreSQL regression scenarios must pass',
+      scenario.expectedTests,
+      'all selected PostgreSQL regression scenarios must pass',
     );
     assert.equal(testSummary.numFailedTests, 0);
     assert.equal(testSummary.numPendingTests, 0);
@@ -1053,6 +1085,7 @@ if (require.main === module) {
 module.exports = {
   prepareIsolatedClient,
   parseSuite,
+  jestScenario,
   writePostgresEnvironment,
   copyMigrationStage,
   createCancellation,
