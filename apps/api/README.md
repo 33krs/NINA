@@ -338,6 +338,49 @@ TLS or actual browser storage. Production HTTPS/trusted ingress, pre-parser
 wiring/limits/attempt controls, frontend single-flight refresh, verified-session
 logout and accepted clinical resource permissions remain separate requirements.
 
+## Isolated browser logout composition (not activated)
+
+`createBrowserLogoutHandler` is an unregistered factory, not a production route
+or provider. It composes the existing policy, bounded duplicate-safe JSON reader,
+strict cookie reader, access verifier and revocation services. The caller supplies
+an explicit canonical HTTPS origin, JSON byte/deadline limits and cookie config;
+there are no defaults, environment reads, signing keys or deployment changes.
+
+No-store runs first, then POST/Origin/public CSRF admission, untouched bounded JSON
+and exactly `{}`, then strict cookies, before any authentication service. Client
+body, query, Authorization and identity headers never select a session or owner.
+Missing or malformed credential envelopes deny generically without deletion.
+
+| Credential envelope                                    | Revocation authority                                                                                                                               |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Refresh present                                        | Atomic `RefreshSessionRevocationService.revoke`; a canonically verified access companion constrains its session/owner/version and mismatches deny. |
+| Access missing, expired or unverifiable; valid refresh | Refresh alone authenticates; null access supplies no identity. No expired claims are decoded or trusted.                                           |
+| Refresh absent                                         | Canonical current `verifySession` followed by `SessionService.revoke` using only its verified session ID/current owner.                            |
+
+A present invalid, consumed or uncertain refresh never falls back to access-only
+revocation. Without a verified companion the refresh service receives exactly one
+argument, not a supplied undefined binding. The handler checks response viability
+after verification before starting revocation and again after settlement. Only
+settled literal `true` permits empty 204 and both matching host-only HttpOnly,
+Secure, SameSite=Strict deletion cookies with Max-Age=0 and epoch Expires.
+
+Admission/shape/authentication failures are generic 403/400/401; parser failures
+retain 400/408/413/415. Thrown dependencies or deletion serialization/header errors
+return generic 500 only while writable. False/throw/uncertain settlement never
+emits deletion cookies or retries. A partial buffered pair is removed before a
+failure response; removal failure or attempted end destroys the response. Lost
+responses cannot undo revocation, prove browser deletion or promise recovery.
+There is no rotation, issuance, compensation, family/account/all-session revoke,
+grace, backend time/idle expiry or uninterrupted-access guarantee.
+
+`browser-logout.http.spec.ts` uses tiny parser/logger-disabled Nest, ephemeral RSA
+keys, typed doubles and owned loopback with cleanup. It proves both HTTP branches,
+strict denial/order, mismatch/no-fallback, settled deletion and disconnect/header
+fault boundaries, not real database concurrency, TLS or browser storage. B2's
+separate PostgreSQL proof remains the database evidence. Production registration,
+HTTPS/ingress/attempt controls, frontend logout/single-flight and accepted clinical
+permissions remain separate; the temporary clinical block is unchanged.
+
 ## Internal access credentials (not registered or exposed)
 
 `AccessCredentialService` is constructor-configured and unregistered. Its
