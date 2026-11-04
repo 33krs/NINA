@@ -1,5 +1,32 @@
 # API verification
 
+## Isolated shared browser-session lifecycle regression
+
+`browser-session-lifecycle.http.spec.ts` mounts only the existing unregistered
+login, refresh and logout handlers on synthetic paths in one tiny Nest app, with
+default body parsing and logging disabled. It uses runtime-generated RSA keys
+and synthetic credentials, the real `AccessCredentialService`, and shared typed,
+stateful service doubles; it never imports AppModule or activates production routes.
+
+The regression follows login cookies through rotation, consumed-refresh replay
+denial and current-session revocation, while checking another session remains
+independent. Missing or expired access does not require a new password when the
+current refresh authenticates logout. Deletion cookies are emitted only after
+affirmative revocation; denial never falls back, retries, renews or clears them.
+Every synthetic route retains Origin/CSRF admission, no-store and empty-success
+contracts. The client explicitly forwards cookie fields: it is **not a browser**.
+
+```sh
+npm run test --workspace=@nina/api -- --runInBand --runTestsByPath src/modules/auth/browser-session-lifecycle.http.spec.ts
+```
+
+This coverage-only regression checks existing behavior, so no artificial RED
+implementation is introduced. Stateful doubles do not establish database
+atomicity, rollback or concurrency. Owned loopback HTTP does not establish actual
+browser cookie storage/eviction, HTTPS/TLS or deployment readiness. The clinical
+block, unregistered handlers and separate activation/clinical-permission
+requirements below remain unchanged.
+
 ## TEMPORARY CLINICAL API BLOCK
 
 **Decision: 2026-10-22, accepted by the user.** This source revision installs a
