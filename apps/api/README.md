@@ -1,5 +1,36 @@
 # API verification
 
+## Browser-auth service composition (inactive)
+
+`createBrowserSessionHandlers(prisma, config)` explicitly assembles the existing
+credential, session, creation, rotation, refresh-revocation and RS256 access
+services, returning the existing `login`, `refresh` and `logout` request handlers.
+All handlers share one access service and one online session service. The caller
+must supply an already-owned `PrismaService`, canonical HTTPS origin, JSON byte
+and read-deadline limits, cookie ages, and matching RS256 key/issuer/audience/
+lifetime configuration. Existing primitives reject missing or invalid settings;
+there are no default credentials, keys, environment lookups or database URLs.
+
+Construction does not create/connect/disconnect Prisma, run database operations,
+log, listen or register anything. This factory is not imported by `AppModule` or
+`main.ts`; no production route or clinical access is enabled. Prisma lifecycle,
+HTTPS ingress, attempt controls, pre-parser route mounting, browser UI and
+clinical authorization remain separate work. Null backend session expiry and
+current-session-only voluntary logout are unchanged; no retry or recovery is
+added.
+
+The focused suite captures handler-factory arguments to prove real service
+instances, shared wiring, credential delegation and use of the supplied client.
+Mocked transaction settlements do **not** execute database callbacks. A separate
+construction test uses real handlers and rejects client access, lifecycle,
+network or logging effects. Ephemeral in-memory RSA keys exercise existing access
+issuance/verification; this is not database, browser-storage, TLS or deployment
+proof. Existing isolated HTTP and PostgreSQL suites retain their own scope.
+
+```sh
+npm run test --workspace=@nina/api -- --runInBand --runTestsByPath src/modules/auth/browser-session-composition.spec.ts
+```
+
 ## Isolated shared browser-session lifecycle regression
 
 `browser-session-lifecycle.http.spec.ts` mounts only the existing unregistered
