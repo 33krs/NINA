@@ -13,6 +13,10 @@ import {
 import { browserAuthNoStore } from './browser-auth-no-store.middleware';
 import { BrowserRequestPolicy } from './browser-request-policy';
 import { BrowserLoginInputReader } from './browser-login-input-reader';
+import {
+  BrowserLoginAttempts,
+  type BrowserLoginAttemptPolicy,
+} from './browser-login-attempts';
 
 export interface BrowserLoginServices {
   readonly creation: Pick<SessionCreationService, 'create'>;
@@ -24,6 +28,7 @@ export interface BrowserLoginConfig {
   readonly canonicalOrigin: string;
   readonly jsonLimits: BrowserAuthJsonLimits;
   readonly cookieConfig: BrowserSessionCookieConfig;
+  readonly attemptPolicy: BrowserLoginAttemptPolicy;
 }
 
 interface OwnedSession {
@@ -40,6 +45,7 @@ export function createBrowserLoginHandler(
   const read = createBrowserAuthJson(config.jsonLimits);
   const cookies = new BrowserSessionCookies(config.cookieConfig);
   const input = new BrowserLoginInputReader();
+  const attempts = new BrowserLoginAttempts(config.attemptPolicy);
   const { creation, access, sessions } = services;
 
   function available(response: Response): boolean {
@@ -81,6 +87,7 @@ export function createBrowserLoginHandler(
       const body: unknown = request.body;
       const credentials = input.read(body);
       if (!credentials) return deny(response, 400);
+      if (!attempts.reserve(credentials.username)) return deny(response, 429);
       const created = await creation.create(
         credentials.username,
         credentials.password,

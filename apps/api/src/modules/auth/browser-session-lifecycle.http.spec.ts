@@ -10,7 +10,7 @@ import {
   it,
   jest,
 } from '@jest/globals';
-import type { Request, Response } from 'express';
+import type { Request, RequestHandler, Response } from 'express';
 import { Buffer } from 'node:buffer';
 import { generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import {
@@ -42,6 +42,12 @@ const PATH = {
   LOGOUT: '/synthetic-logout',
 } as const;
 const config: BrowserLoginConfig = {
+  attemptPolicy: {
+    windowMs: 60_000,
+    maxAttemptsPerUsername: 2,
+    maxAttemptsGlobal: 2,
+    maxTrackedUsernames: 2,
+  },
   canonicalOrigin: ORIGIN,
   jsonLimits: { maxBytes: 256, readTimeoutMs: 100 },
   cookieConfig: { accessMaxAgeSeconds: 60, refreshMaxAgeSeconds: 3600 },
@@ -77,6 +83,7 @@ function deferred<T>() {
 // These shared doubles model only handler composition, not database transactions.
 describe('isolated shared browser session HTTP lifecycle', () => {
   let app: NestExpressApplication;
+  let login: RequestHandler;
   let port: number;
   let access: AccessCredentialService;
   let username: string;
@@ -200,12 +207,8 @@ describe('isolated shared browser session HTTP lifecycle', () => {
       }
       next();
     });
-    app.use(
-      PATH.LOGIN,
-      createBrowserLoginHandler(
-        { creation: { create }, access: { issue }, sessions: { revoke } },
-        config,
-      ),
+    app.use(PATH.LOGIN, (req: Request, res: Response, next: () => void) =>
+      login(req, res, next),
     );
     app.use(
       PATH.REFRESH,
@@ -231,6 +234,10 @@ describe('isolated shared browser session HTTP lifecycle', () => {
   });
 
   beforeEach(() => {
+    login = createBrowserLoginHandler(
+      { creation: { create }, access: { issue }, sessions: { revoke } },
+      config,
+    );
     sessions.clear();
     refreshes.clear();
     events = [];
@@ -309,6 +316,10 @@ describe('isolated shared browser session HTTP lifecycle', () => {
   it('shares login, rotation, replay denial and revocation while another session stays independent', async () => {
     const initial = pair(await send(PATH.LOGIN));
     const other = pair(await send(PATH.LOGIN));
+    responseContract(await send(PATH.LOGIN), 429);
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(revoke).not.toHaveBeenCalled();
+    expect(revokeRefresh).not.toHaveBeenCalled();
     const binding = await access.verifySession(initial.access);
     expect(binding).not.toBeNull();
     expect(create).toHaveBeenNthCalledWith(1, username, password, null);

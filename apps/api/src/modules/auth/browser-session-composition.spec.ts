@@ -30,6 +30,12 @@ const sessionId = '20000000-0000-4000-8000-000000000002';
 
 function config(): BrowserSessionCompositionConfig {
   return {
+    attemptPolicy: {
+      windowMs: 60_000,
+      maxAttemptsPerUsername: 20,
+      maxAttemptsGlobal: 20,
+      maxTrackedUsernames: 20,
+    },
     canonicalOrigin: 'https://nina.example',
     jsonLimits: { maxBytes: 2048, readTimeoutMs: 1000 },
     cookieConfig: { accessMaxAgeSeconds: 60, refreshMaxAgeSeconds: 3600 },
@@ -103,6 +109,7 @@ describe('inactive browser session composition', () => {
     expect(logout.access).toBe(login.access);
     expect(logout.sessions).toBe(login.sessions);
     expect(loginConfig).toBe(f.settings);
+    expect(loginConfig.attemptPolicy).toBe(f.settings.attemptPolicy);
     expect(refreshConfig).toBe(f.settings);
     expect(logoutConfig).toBe(f.settings);
     expect(f.database.$transaction).not.toHaveBeenCalled();
@@ -257,6 +264,14 @@ describe('inactive browser session composition', () => {
   it.each([
     ['missing configuration', undefined],
     ['null configuration', null],
+    ['missing login attempt policy', { ...config(), attemptPolicy: undefined }],
+    [
+      'invalid login attempt policy',
+      {
+        ...config(),
+        attemptPolicy: { ...config().attemptPolicy, maxAttemptsGlobal: 0 },
+      },
+    ],
     ['missing origin', { ...config(), canonicalOrigin: undefined }],
     ['HTTP origin', { ...config(), canonicalOrigin: 'http://nina.example' }],
     [
