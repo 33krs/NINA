@@ -10,7 +10,7 @@ import {
   it,
   jest,
 } from '@jest/globals';
-import type { Request, Response } from 'express';
+import type { Request, RequestHandler, Response } from 'express';
 import { Buffer } from 'node:buffer';
 import { generateKeyPairSync } from 'node:crypto';
 import {
@@ -49,6 +49,12 @@ const BODY = JSON.stringify({
   password: ' exact password ',
 });
 const config: BrowserLoginConfig = {
+  attemptPolicy: {
+    windowMs: 60_000,
+    maxAttemptsPerUsername: 2,
+    maxAttemptsGlobal: 3,
+    maxTrackedUsernames: 2,
+  },
   canonicalOrigin: ORIGIN,
   jsonLimits: { maxBytes: 256, readTimeoutMs: 100 },
   cookieConfig: { accessMaxAgeSeconds: 60, refreshMaxAgeSeconds: 3600 },
@@ -82,6 +88,7 @@ function created(id = SID): CreatedSession {
 
 describe('isolated browser login HTTP composition', () => {
   let app: NestExpressApplication;
+  let login: RequestHandler;
   let port: number;
   let fault: Fault;
   let latestRequest: Request;
@@ -168,6 +175,12 @@ describe('isolated browser login HTTP composition', () => {
     expect(result.headers['set-cookie']).toBeUndefined();
     expect(result.body).not.toContain('password');
     expect(result.body).not.toContain(REFRESH);
+    if (status === 429) {
+      expect(result.body).toBe('{"message":"Authentication failed"}');
+      expect(result.headers['retry-after']).toBeUndefined();
+      expect(result.headers['ratelimit-remaining']).toBeUndefined();
+      expect(result.body).not.toContain(account.username);
+    }
     expect(downstream).toBe(0);
   }
 
@@ -205,7 +218,10 @@ describe('isolated browser login HTTP composition', () => {
         });
       next();
     });
-    app.use('/synthetic-login', createBrowserLoginHandler(services, config));
+    app.use(
+      '/synthetic-login',
+      (req: Request, res: Response, next: () => void) => login(req, res, next),
+    );
     app.use((_request: Request, response: Response) => {
       downstream++;
       response.status(599).end();
@@ -216,6 +232,7 @@ describe('isolated browser login HTTP composition', () => {
   });
 
   beforeEach(() => {
+    login = createBrowserLoginHandler(services, config);
     jest.clearAllMocks();
     events = [];
     fault = FAULT.NONE;
@@ -240,6 +257,29 @@ describe('isolated browser login HTTP composition', () => {
     jest.restoreAllMocks();
   });
   afterAll(async () => app?.close());
+
+  it('reserves simultaneous admission before pending creation and denies exhausted aliases', async () => {
+    const began = deferred<void>();
+    const release = deferred<CreatedSession | null>();
+    create.mockImplementation(() => {
+      if (create.mock.calls.length === 2) began.resolve();
+      return release.promise;
+    });
+    const first = send();
+    const second = send(
+      JSON.stringify({ username: 'LEARNER', password: 'other' }),
+    );
+    await began.promise;
+    // A broken gate must finish too, rather than hanging the RED test.
+    create.mockImplementation(async () => created());
+    try {
+      rejected(await send(), 429);
+      expect(create).toHaveBeenCalledTimes(2);
+    } finally {
+      release.resolve(created());
+      await Promise.all([first, second]);
+    }
+  });
 
   it('issues a session-bound pair only after null-expiry creation and online validation', async () => {
     const result = await send();
@@ -266,6 +306,83 @@ describe('isolated browser login HTTP composition', () => {
     await new Promise<void>((resolve) => globalThis.setImmediate(resolve));
     expect(revoke).not.toHaveBeenCalled();
     expect(downstream).toBe(0);
+  });
+
+  it('counts success without resetting or refunding its canonical username budget', async () => {
+    expect((await send()).status).toBe(204);
+    expect((await send()).status).toBe(204);
+    rejected(await send(), 429);
+    expect(create).toHaveBeenCalledTimes(2);
+    expect(issue).toHaveBeenCalledTimes(2);
+    expect(validate).toHaveBeenCalledTimes(2);
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    'counts unknown-account null/throw outcomes without identity-dependent admission: %s',
+    async (throws) => {
+      if (throws)
+        create.mockRejectedValue(new Error('Synthetic private failure'));
+      else create.mockResolvedValue(null);
+      const body = JSON.stringify({ username: 'unknown', password: 'fixture' });
+      rejected(await send(body), throws ? 500 : 401);
+      rejected(await send(body), throws ? 500 : 401);
+      rejected(await send(body), 429);
+      expect(create).toHaveBeenCalledTimes(2);
+      expect(issue).not.toHaveBeenCalled();
+      expect(validate).not.toHaveBeenCalled();
+      expect(revoke).not.toHaveBeenCalled();
+    },
+  );
+
+  it('bounds global attempts across names and ignores address/forwarding headers', async () => {
+    expect((await send()).status).toBe(204);
+    expect(
+      (await send(JSON.stringify({ username: 'second', password: 'fixture' })))
+        .status,
+    ).toBe(204);
+    expect((await send()).status).toBe(204);
+    rejected(
+      await send(JSON.stringify({ username: 'third', password: 'fixture' }), {
+        'X-Forwarded-For': '192.0.2.99',
+        Forwarded: 'for=192.0.2.100',
+      }),
+      429,
+    );
+    expect(create).toHaveBeenCalledTimes(3);
+    expect(issue).toHaveBeenCalledTimes(3);
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
+  it('does not evict a tracked username when unknown names fill state capacity', async () => {
+    const body = (username: string) =>
+      JSON.stringify({ username, password: 'fixture' });
+    expect((await send(body('first'))).status).toBe(204);
+    expect((await send(body('second'))).status).toBe(204);
+    rejected(await send(body('third')), 429);
+    expect((await send(body('FIRST'))).status).toBe(204);
+    expect(create).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not charge rejected Origin or invalid transport shape against login admission', async () => {
+    rejected(await send(BODY, { Origin: 'https://other.test' }), 403);
+    rejected(await send('{'), 400);
+    rejected(await send('{}'), 400);
+    expect((await send()).status).toBe(204);
+    expect((await send()).status).toBe(204);
+    rejected(await send(), 429);
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it('denies an invalid canonical username without reaching credential services', async () => {
+    rejected(
+      await send(JSON.stringify({ username: 'ab', password: 'fixture' })),
+      429,
+    );
+    expect(create).not.toHaveBeenCalled();
+    expect(issue).not.toHaveBeenCalled();
+    expect(validate).not.toHaveBeenCalled();
+    expect(revoke).not.toHaveBeenCalled();
   });
 
   it.each<[string, OutgoingHttpHeaders]>([
@@ -371,6 +488,10 @@ describe('isolated browser login HTTP composition', () => {
     rejected(await send(), 500);
     expect(revoke).toHaveBeenCalledTimes(1);
     expect(latestResponse.getHeader('Set-Cookie')).toBeUndefined();
+    fault = FAULT.NONE;
+    expect((await send()).status).toBe(204);
+    rejected(await send(), 429);
+    expect(revoke).toHaveBeenCalledTimes(1);
   });
 
   it('destroys the response if buffered cookies cannot be removed', async () => {
@@ -430,6 +551,11 @@ describe('isolated browser login HTTP composition', () => {
       if (stage === 'create') expect(issue).not.toHaveBeenCalled();
       expect(latestResponse.getHeader('Set-Cookie')).toBeUndefined();
       expect(downstream).toBe(0);
+      create.mockResolvedValue(created());
+      issue.mockResolvedValue('a.b.c');
+      expect((await send()).status).toBe(204);
+      rejected(await send(), 429);
+      expect(revoke).toHaveBeenCalledTimes(1);
     },
   );
 

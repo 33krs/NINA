@@ -321,19 +321,21 @@ canonical origin/TLS/LAN ingress/authorization requirements remain unchanged.
 `createBrowserLoginHandler(services, config)` composes the existing protections;
 it registers no route and leaves the clinical block unchanged. Supply typed
 creation/access/revocation ports and explicit canonical HTTPS origin, JSON byte
-and read-deadline limits, and access/refresh cookie ages. Existing constructors
+and read-deadline limits, access/refresh cookie ages, and the mandatory login
+attempt policy described below. Existing constructors
 validate and copy configuration; there are no environment reads or defaults.
 
 The boundary runs no-store → exact POST/Origin/public-CSRF-marker admission →
-bounded duplicate-safe JSON → exact login-input extraction →
-`create(username, password, null)` → session-bound access issuance → complete
+bounded duplicate-safe JSON → exact login-input extraction → synchronous
+count-all attempt reservation → `create(username, password, null)` → session-bound access issuance → complete
 cookie-pair serialization. Success is empty HTTP 204 with two separate Secure,
 HttpOnly, SameSite=Strict, host-only cookie fields. No credentials, session IDs
 or identity are returned in JSON or logged. Backend expiry remains explicit null;
 finite access-token/cookie retention is not a time/idle forced-login policy.
 
 Admission returns generic 403 before reading the body or calling services;
-invalid login shape returns 400, creation denial 401, and internal failure 500.
+invalid login shape returns 400, attempt admission denial 429, creation denial
+401, and internal failure 500.
 The body reader retains its generic 400/408/413/415 responses. Application-handled
 responses are no-store; rejected connections close without unbounded draining.
 Disconnected clients and pre-application Node/proxy failures may receive nothing.
@@ -351,9 +353,56 @@ owned loopback clients, ephemeral RSA keys and typed service doubles. It checks
 successful online validation, admission/body rejection, failure cleanup,
 disconnects and concurrent isolation; it is not actual NINA/browser/TLS/database
 or deployment proof. Activation still needs canonical HTTPS/trusted ingress,
-pre-parser production wiring, server/proxy limits, login-attempt controls and
+pre-parser production wiring, server/proxy limits, explicitly configured attempt
+policy and
 whole-application negative proof. Scrypt queue bounds are not throttling. Resume,
 voluntary logout, frontend and accepted clinical permissions remain separate.
+
+## Temporary login-attempt admission (inactive)
+
+`BrowserLoginAttempts` is instantiated once inside `createBrowserLoginHandler`;
+`createBrowserSessionHandlers` requires its policy through `BrowserLoginConfig`.
+No unused helper, production route registration, environment lookup or threshold
+default is added. Callers must explicitly provide finite positive safe integers:
+`windowMs`, `maxAttemptsPerUsername`, `maxAttemptsGlobal`, and
+`maxTrackedUsernames`. The constructor copies all four values. No deployment
+numbers are selected here.
+
+After request/body/input validation and before the first credential-service await,
+the handler synchronously reserves one global and canonical-username attempt.
+Existing ASCII trim/lowercase username rules merge aliases; unknown legal names
+use the same accounting without querying account existence first. Invalid
+canonical usernames deny before credential work. Every admitted attempt counts,
+including successful login, null/throw, issuance failure and client disconnect.
+There are no refunds, success resets, account locks or session mutations by the
+gate. Existing login-only failure compensation remains unchanged.
+
+All usernames share one fixed window driven by a monotonic clock. At elapsed
+`>= windowMs`, counters and tracked names reset together; rejected requests do not
+extend it. Invalid, throwing or backward clock observations deny safely without
+resetting state. Global and per-username counters are bounded; a full username map
+rejects new names without evicting existing buckets. Exhaustion and invalid
+canonical usernames return the same generic no-store HTTP 429 failure, without
+cookies, identity/rate-limit details, credential work, issuance or revocation.
+No passwords, addresses, cookies or tokens are retained by the gate, and forwarded
+headers are never admission identity.
+
+This is temporary count-all admission, not protection from all denial of service.
+Correct credentials can be delayed by per-name, global or map exhaustion; a
+fixed-window boundary permits bursts across adjacent windows. Enforcement covers
+only **one Node process/isolate with a reused handler graph**. Restarting the
+process or recreating the graph resets counters; multiple workers/replicas or
+separately constructed login paths need shared enforcement before exposure.
+Parsing and all pre-admission work, other endpoints, network/proxy limits and
+multi-instance deployments are not protected by this gate. No activation is
+authorized or claimed.
+
+Active sessions, null backend expiry, refresh, voluntary logout and the clinical
+guard are unchanged. The isolated HTTP lifecycle regression exhausts login and
+then exercises refresh/logout while another valid session stays independent.
+Unit/HTTP tests cover reservations while creation is pending, fixed-window edges,
+configuration copying, clock failures, capacity, aliases and failure accounting;
+they are not real browser, TLS, database or deployment proof.
 
 ## Isolated browser refresh composition (not registered or exposed)
 
