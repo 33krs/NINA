@@ -1,7 +1,12 @@
 import { describe, expect, it, jest } from '@jest/globals';
 import express, { type Express, type Request, type Response } from 'express';
-import { IncomingMessage, ServerResponse } from 'node:http';
-import { Socket } from 'node:net';
+import {
+  IncomingMessage,
+  ServerResponse,
+  request as httpRequest,
+} from 'node:http';
+import { Socket, type AddressInfo } from 'node:net';
+import { Readable } from 'node:stream';
 import { generateKeyPairSync } from 'node:crypto';
 import { Buffer } from 'node:buffer';
 import { mountBrowserSessionRoutes } from './browser-session-mount';
@@ -59,6 +64,8 @@ function request(
       origin,
       'Content-Type',
       'application/json',
+      'Content-Length',
+      String(Buffer.byteLength(raw)),
       'X-Nina-Csrf-Protection',
       '1',
     ];
@@ -138,19 +145,76 @@ describe('independent browser mount verification', () => {
     });
     expect(writes).not.toHaveBeenCalled();
   });
-  it('fails closed when incorrectly mounted after a parser', async () => {
+  it('fails closed when incorrectly mounted after the real JSON parser', async () => {
     const { prisma, writes } = fixture();
     const app = express();
-    app.use((req, _res, next) => {
-      req.body = {};
+    app.use(express.json());
+    const parsed = jest.fn((req: Request, _res: Response, next: () => void) => {
+      expect(req.body).toEqual({});
+      expect(Readable.isDisturbed(req)).toBe(true);
       next();
     });
+    app.use(parsed);
     mountBrowserSessionRoutes(app, prisma, config());
-    expect(await request(app, '/auth/login')).toMatchObject({
-      status: 400,
-      body: '{"message":"Invalid request body"}',
-      cookie: undefined,
-    });
+    const server = app.listen(0, '127.0.0.1');
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once('listening', resolve);
+        server.once('error', reject);
+      });
+      const port = (server.address() as AddressInfo).port;
+      for (const path of ['/auth/login', '/auth/refresh', '/auth/logout']) {
+        const result = await new Promise<{
+          status: number | undefined;
+          body: string;
+          cookie: unknown;
+          cache: unknown;
+        }>((resolve, reject) => {
+          const req = httpRequest(
+            {
+              host: '127.0.0.1',
+              port,
+              path,
+              method: 'POST',
+              headers: {
+                Origin: 'https://localhost',
+                'Content-Type': 'application/json',
+                'X-Nina-Csrf-Protection': '1',
+              },
+            },
+            (res) => {
+              let body = '';
+              res.setEncoding('utf8');
+              res.on('data', (chunk: string) => {
+                body += chunk;
+              });
+              res.on('end', () =>
+                resolve({
+                  status: res.statusCode,
+                  body,
+                  cookie: res.headers['set-cookie'],
+                  cache: res.headers['cache-control'],
+                }),
+              );
+              res.on('error', reject);
+            },
+          );
+          req.on('error', reject);
+          req.end('{}');
+        });
+        expect(result).toMatchObject({
+          status: 400,
+          body: '{"message":"Invalid request body"}',
+          cookie: undefined,
+          cache: 'no-store',
+        });
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+    expect(parsed).toHaveBeenCalledTimes(3);
     expect(writes).not.toHaveBeenCalled();
   });
   it('leaves a real Express application untouched for invalid real configuration', async () => {
