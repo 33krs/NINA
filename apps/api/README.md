@@ -1,8 +1,13 @@
 # API verification
 
-## Local HTTPS authentication configuration (not yet active)
+## Local HTTPS API startup
 
-This slice prepares configuration validation only; the API startup is unchanged.
+The API starts on `127.0.0.1:3001` using HTTPS and mounts browser session
+routes before the standard JSON and URL-encoded parsers. The browser origin is
+`https://localhost:3001`. This replaces the previous HTTP listener: startup
+fails when required configuration is missing or invalid. The temporary
+clinical access block below remains in force after authentication.
+
 Supply these values privately in the operator's environment before starting
 the API; do not commit secret material or share its files:
 
@@ -29,7 +34,17 @@ on Windows. NINA does not generate keys or install browser trust. A local
 administrator must provision and protect the files and certificate trust.
 The HTTPS tests require `openssl` to generate temporary test material.
 
-## Browser-auth route mounting (inactive)
+This backend change does **not** provide a login screen, account provisioning,
+same-origin frontend routing, or permission to access clinical data. Tests use
+an ephemeral certificate and stub the database lifecycle; they do not prove a
+trusted Windows browser setup or real-database login.
+
+The component descriptions below include historical notes from before startup
+integration. Statements there about routes being unregistered or inactive
+describe those earlier isolated components and are superseded by the local
+HTTPS startup described above. The clinical block remains active.
+
+## Browser-auth route mounting
 
 `mountBrowserSessionRoutes(app, prisma, config)` constructs one shared browser
 session handler graph and registers exact POST routes `/auth/login`,
@@ -38,10 +53,11 @@ caller must mount it before any body parser; the helper does not check ordering.
 Handler construction validates the supplied configuration before registration.
 Registration errors may leave a partial route set, so a caller must abandon the
 application if mounting fails. The helper does not create a listener, configure
-HTTPS, restrict network binding, change clinical authorization, or activate
-routes in `main.ts`. This is not deployment or browser-security proof.
+HTTPS, restrict network binding, or change clinical authorization. The local
+startup calls it before installing parsers. This is not Windows deployment or
+browser-security proof.
 
-## Browser-auth service composition (inactive)
+## Browser-auth service composition
 
 `createBrowserSessionHandlers(prisma, config)` explicitly assembles the existing
 credential, session, creation, rotation, refresh-revocation and RS256 access
@@ -53,10 +69,10 @@ lifetime configuration. Existing primitives reject missing or invalid settings;
 there are no default credentials, keys, environment lookups or database URLs.
 
 Construction does not create/connect/disconnect Prisma, run database operations,
-log, listen or register anything. This factory is not imported by `AppModule` or
-`main.ts`; no production route or clinical access is enabled. Prisma lifecycle,
-HTTPS ingress, attempt controls, pre-parser route mounting, browser UI and
-clinical authorization remain separate work. Null backend session expiry and
+log, listen or register anything. Local startup invokes it through the mounting
+helper, with the Nest-owned Prisma lifecycle. Browser UI, same-origin frontend
+ingress, account provisioning, and clinical authorization remain separate work.
+Null backend session expiry and
 current-session-only voluntary logout are unchanged; no retry or recovery is
 added.
 
@@ -95,9 +111,8 @@ npm run test --workspace=@nina/api -- --runInBand --runTestsByPath src/modules/a
 This coverage-only regression checks existing behavior, so no artificial RED
 implementation is introduced. Stateful doubles do not establish database
 atomicity, rollback or concurrency. Owned loopback HTTP does not establish actual
-browser cookie storage/eviction, HTTPS/TLS or deployment readiness. The clinical
-block, unregistered handlers and separate activation/clinical-permission
-requirements below remain unchanged.
+browser cookie storage/eviction, trusted Windows deployment, or clinical
+permission proof. The clinical block remains unchanged.
 
 ## TEMPORARY CLINICAL API BLOCK
 
@@ -111,9 +126,9 @@ The block is deliberate and **temporary**, pending verified identity and accepte
 clinical resource permissions; it is not a database outage. It has no automatic
 expiry or environment bypass. Evolve the narrow policy only after authentication,
 resource authorization, and negative HTTP tests are proven. Do not remove the
-global guard or grant every logged-in role unrestricted clinical access. No login,
-refresh/logout route, JWT, cookie, or browser integration is activated here;
-internal nonexpiring session foundations remain unregistered and unchanged.
+global guard or grant every logged-in role unrestricted clinical access. The
+local HTTPS API mounts login, refresh and logout routes, but does not change the
+clinical guard or provide a browser login interface.
 
 `access-boundary.http.spec.ts` exercises AppModule without overriding the guard.
 Appointment/odontogram controller HTTP suites and the opt-in appointment live
@@ -127,12 +142,11 @@ source literal, not credentials from Git history.
 
 ## Browser authentication POST admission (not registered or exposed)
 
-`BrowserRequestPolicy` defines admission for future same-origin browser auth
+`BrowserRequestPolicy` defines admission for same-origin browser auth
 POSTs, including login. It mounts no route and leaves the clinical block above
-unchanged. Student LAN access must use one canonical **HTTPS** browser origin;
-there is no HTTP, LAN or localhost exemption. The actual address, certificate,
-TLS termination and ingress/proxy configuration remain unset activation
-prerequisites, not values discovered from request headers or the environment.
+unchanged. Local startup uses one canonical **HTTPS** browser origin and no HTTP
+exemption. The operator supplies certificate files and browser trust separately;
+the origin is not derived from request headers.
 
 The constructor requires that explicit primitive HTTPS origin with exact
 `URL.origin` spelling: no paths, credentials, wildcard, whitespace or defaults.
@@ -399,12 +413,12 @@ policy and
 whole-application negative proof. Scrypt queue bounds are not throttling. Resume,
 voluntary logout, frontend and accepted clinical permissions remain separate.
 
-## Temporary login-attempt admission (inactive)
+## Temporary login-attempt admission
 
 `BrowserLoginAttempts` is instantiated once inside `createBrowserLoginHandler`;
 `createBrowserSessionHandlers` requires its policy through `BrowserLoginConfig`.
-No unused helper, production route registration, environment lookup or threshold
-default is added. Callers must explicitly provide finite positive safe integers:
+Local startup reads the four thresholds from the operator environment; there
+are no threshold defaults. Callers must provide finite positive safe integers:
 `windowMs`, `maxAttemptsPerUsername`, `maxAttemptsGlobal`, and
 `maxTrackedUsernames`. The constructor copies all four values. No deployment
 numbers are selected here.
@@ -435,8 +449,8 @@ only **one Node process/isolate with a reused handler graph**. Restarting the
 process or recreating the graph resets counters; multiple workers/replicas or
 separately constructed login paths need shared enforcement before exposure.
 Parsing and all pre-admission work, other endpoints, network/proxy limits and
-multi-instance deployments are not protected by this gate. No activation is
-authorized or claimed.
+multi-instance deployments are not protected by this gate. Local startup uses
+one process and one reused handler graph.
 
 Active sessions, null backend expiry, refresh, voluntary logout and the clinical
 guard are unchanged. The isolated HTTP lifecycle regression exhausts login and
