@@ -23,6 +23,12 @@ the API; do not commit secret material or share its files:
   `NINA_AUTH_ATTEMPTS_GLOBAL`, and `NINA_AUTH_TRACKED_USERS`: positive integer
   login admission policy values for the single local process.
 
+No private key, password or database URL is supplied by the repository. Values
+must be set using the local operating system's environment mechanism, including
+on Windows. NINA does not generate keys or install browser trust. A local
+administrator must provision and protect the files and certificate trust.
+The HTTPS tests require `openssl` to generate temporary test material.
+
 ## Browser-auth route mounting (inactive)
 
 `mountBrowserSessionRoutes(app, prisma, config)` constructs one shared browser
