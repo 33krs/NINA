@@ -1,5 +1,28 @@
 # API verification
 
+## Local HTTPS authentication configuration (not yet active)
+
+This slice prepares configuration validation only; the API startup is unchanged.
+Supply these values privately in the operator's environment before starting
+the API; do not commit secret material or share its files:
+
+- `DATABASE_URL`: the existing database connection setting.
+- `NINA_TLS_CERT_FILE` and `NINA_TLS_KEY_FILE`: paths to the local TLS
+  certificate and its matching private key. The certificate must be valid for
+  `localhost` in its subject alternative names and trusted by the browser.
+- `NINA_SIGNING_KEY_FILE`: path to a separate persistent RSA private signing
+  key of at least 2048 bits. Do not reuse the TLS key. Its public key is derived
+  at startup; do not rotate this key on every restart.
+- `NINA_AUTH_ISSUER` and `NINA_AUTH_AUDIENCE`: nonempty access-token labels.
+- `NINA_AUTH_ACCESS_SECONDS` and `NINA_AUTH_REFRESH_SECONDS`: positive integer
+  cookie lifetimes; access lifetime is also the token lifetime. Existing cookie
+  validation limits these values to 900 and 34560000 seconds respectively.
+- `NINA_AUTH_JSON_MAX_BYTES` and `NINA_AUTH_JSON_TIMEOUT_MS`: positive integer
+  request-body limit and read timeout.
+- `NINA_AUTH_ATTEMPT_WINDOW_MS`, `NINA_AUTH_ATTEMPTS_PER_USER`,
+  `NINA_AUTH_ATTEMPTS_GLOBAL`, and `NINA_AUTH_TRACKED_USERS`: positive integer
+  login admission policy values for the single local process.
+
 ## Browser-auth route mounting (inactive)
 
 `mountBrowserSessionRoutes(app, prisma, config)` constructs one shared browser
