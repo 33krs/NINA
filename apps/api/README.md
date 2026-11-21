@@ -1,5 +1,17 @@
 # API verification
 
+## Browser-auth route mounting (inactive)
+
+`mountBrowserSessionRoutes(app, prisma, config)` constructs one shared browser
+session handler graph and registers exact POST routes `/auth/login`,
+`/auth/refresh`, and `/auth/logout` on the supplied Express application. The
+caller must mount it before any body parser; the helper does not check ordering.
+Handler construction validates the supplied configuration before registration.
+Registration errors may leave a partial route set, so a caller must abandon the
+application if mounting fails. The helper does not create a listener, configure
+HTTPS, restrict network binding, change clinical authorization, or activate
+routes in `main.ts`. This is not deployment or browser-security proof.
+
 ## Browser-auth service composition (inactive)
 
 `createBrowserSessionHandlers(prisma, config)` explicitly assembles the existing
