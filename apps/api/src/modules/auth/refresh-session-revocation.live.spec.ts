@@ -186,6 +186,33 @@ function latch() {
   return { promise, resolve };
 }
 
+function hasExpectedHostCookieAttributes(
+  cookie: string,
+  maxAge: number,
+): boolean {
+  const attributes = cookie
+    .split(';')
+    .slice(1)
+    .map((value) => value.trim().toLowerCase());
+  const names = attributes.map((value) => value.split('=', 1)[0].trim());
+  const paths = attributes.filter((_value, index) => names[index] === 'path');
+  const ages = attributes.filter((_value, index) => names[index] === 'max-age');
+  const sameSites = attributes.filter(
+    (_value, index) => names[index] === 'samesite',
+  );
+  return (
+    paths.length === 1 &&
+    paths[0] === 'path=/' &&
+    !names.includes('domain') &&
+    ages.length === 1 &&
+    ages[0] === `max-age=${maxAge}` &&
+    attributes.includes('secure') &&
+    attributes.includes('httponly') &&
+    sameSites.length === 1 &&
+    sameSites[0] === 'samesite=strict'
+  );
+}
+
 const databaseUrl = ownedUrl();
 const postgres15 = databaseUrl ? describe : describe.skip;
 postgres15('Refresh-authenticated revocation on owned PostgreSQL 15', () => {
@@ -455,10 +482,23 @@ postgres15('Refresh-authenticated revocation on owned PostgreSQL 15', () => {
       );
       expect(Boolean(access && refresh)).toBe(true);
       for (const cookie of response.cookies) {
-        expect(cookie.includes('; Secure')).toBe(true);
-        expect(cookie.includes('; HttpOnly')).toBe(true);
-        expect(cookie.includes('; SameSite=Strict')).toBe(true);
-        expect(cookie.includes('; Path=/')).toBe(true);
+        const maxAge = cookie.startsWith('__Host-nina-access=') ? 60 : 3600;
+        expect(hasExpectedHostCookieAttributes(cookie, maxAge)).toBe(true);
+        expect(
+          hasExpectedHostCookieAttributes(
+            cookie.replace('; Path=/', '; Path=/auth'),
+            maxAge,
+          ),
+        ).toBe(false);
+        expect(
+          hasExpectedHostCookieAttributes(
+            `${cookie}; Domain=example.invalid`,
+            maxAge,
+          ),
+        ).toBe(false);
+        expect(
+          hasExpectedHostCookieAttributes(`${cookie}; SameSite=None`, maxAge),
+        ).toBe(false);
       }
       const token = refresh!
         .split(';', 1)[0]
