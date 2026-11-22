@@ -822,7 +822,7 @@ node apps/api/scripts/verify-odontogram-postgres.cjs --suite=auth-session-revoca
 
 Run from the repository root. The explicit auth branch applies **all existing
 migrations**, generates a temporary Prisma client, and runs only
-`src/modules/auth/refresh-session-revocation.live.spec.ts` (17 scenarios).
+`src/modules/auth/refresh-session-revocation.live.spec.ts` (18 scenarios).
 Ordinary Jest runs skip this suite without creating a client. No application
 schema, HTTP registration or deployment settings are changed.
 
@@ -834,6 +834,11 @@ and credential/session environment variables are not inherited. This is resource
 isolation, **not an air-gap or a claim that network egress is disabled**.
 
 Actual revocation and rotation services use independent real Prisma clients.
+One scenario also starts the real HTTPS API and signs in with a generated,
+isolated account. It checks empty success, secure session cookies, the signed
+access token's owner and session, and the persisted refresh-token hash. TLS and signing keys and the test
+password are generated for the run; the disposable database is removed by the
+runner. This is an HTTPS client test, not a browser or Windows deployment proof.
 The proof covers null/finite expiry, state and binding denials, owner/session
 and sibling-token isolation, double logout, and rotation/logout in both lock
 orders. Server-side advisory/row-lock barriers plus identified backend blocking
