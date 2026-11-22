@@ -213,6 +213,10 @@ function hasExpectedHostCookieAttributes(
   );
 }
 
+function withNonRootPath(cookie: string): string {
+  return cookie.replace(/;\s*path=\/(?=\s*(?:;|$))/i, '; Path=/auth');
+}
+
 const databaseUrl = ownedUrl();
 const postgres15 = databaseUrl ? describe : describe.skip;
 postgres15('Refresh-authenticated revocation on owned PostgreSQL 15', () => {
@@ -481,12 +485,19 @@ postgres15('Refresh-authenticated revocation on owned PostgreSQL 15', () => {
         value.startsWith('__Host-nina-refresh='),
       );
       expect(Boolean(access && refresh)).toBe(true);
+      for (const path of ['; Path=/', ';path=/', '; PATH=/']) {
+        const cookie = `sample=value${path}; Max-Age=60; Secure; HttpOnly; SameSite=Strict`;
+        expect(hasExpectedHostCookieAttributes(cookie, 60)).toBe(true);
+        expect(
+          hasExpectedHostCookieAttributes(withNonRootPath(cookie), 60),
+        ).toBe(false);
+      }
       for (const cookie of response.cookies) {
         const maxAge = cookie.startsWith('__Host-nina-access=') ? 60 : 3600;
         expect(hasExpectedHostCookieAttributes(cookie, maxAge)).toBe(true);
         expect(
           hasExpectedHostCookieAttributes(
-            cookie.replace('; Path=/', '; Path=/auth'),
+            withNonRootPath(cookie),
             maxAge,
           ),
         ).toBe(false);
