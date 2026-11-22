@@ -1267,7 +1267,7 @@ test('auth suite selects only its exact real-service proof and all migrations', 
   );
   assert.deepEqual(jestScenario('auth-session-revocation'), {
     testPath: 'src/modules/auth/refresh-session-revocation.live.spec.ts',
-    expectedTests: 17,
+    expectedTests: 18,
   });
   assert.deepEqual(jestScenario('odontogram'), {
     testPath: 'src/modules/odontogram/odontogram.live.spec.ts',

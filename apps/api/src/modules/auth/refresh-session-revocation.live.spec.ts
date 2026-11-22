@@ -1,13 +1,30 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import {
+  createHash,
+  generateKeyPairSync,
+  randomBytes,
+  randomUUID,
+} from 'node:crypto';
+import { execFileSync, spawnSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { request } from 'node:https';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import process from 'node:process';
 import { URL } from 'node:url';
 import { setTimeout } from 'node:timers/promises';
 import type { Prisma } from '@prisma/client';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { afterAll, describe, expect, it, jest } from '@jest/globals';
+import * as jwt from 'jsonwebtoken';
 
 jest.mock('@prisma/client', () => {
   if (process.env.NINA_AUTH_SESSION_REVOCATION_PG15 !== '1')
@@ -22,6 +39,7 @@ jest.mock('@prisma/client', () => {
 
 import { PrismaClient } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
+import { hashPassword } from './password-hash';
 import {
   RefreshRotationService,
   type RotatedSession,
@@ -166,6 +184,37 @@ function latch() {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => (resolve = done));
   return { promise, resolve };
+}
+
+function hasExpectedHostCookieAttributes(
+  cookie: string,
+  maxAge: number,
+): boolean {
+  const attributes = cookie
+    .split(';')
+    .slice(1)
+    .map((value) => value.trim().toLowerCase());
+  const names = attributes.map((value) => value.split('=', 1)[0].trim());
+  const paths = attributes.filter((_value, index) => names[index] === 'path');
+  const ages = attributes.filter((_value, index) => names[index] === 'max-age');
+  const sameSites = attributes.filter(
+    (_value, index) => names[index] === 'samesite',
+  );
+  return (
+    paths.length === 1 &&
+    paths[0] === 'path=/' &&
+    !names.includes('domain') &&
+    ages.length === 1 &&
+    ages[0] === `max-age=${maxAge}` &&
+    attributes.includes('secure') &&
+    attributes.includes('httponly') &&
+    sameSites.length === 1 &&
+    sameSites[0] === 'samesite=strict'
+  );
+}
+
+function withNonRootPath(cookie: string): string {
+  return cookie.replace(/;\s*path=\/(?=\s*(?:;|$))/i, '; Path=/auth');
 }
 
 const databaseUrl = ownedUrl();
@@ -316,6 +365,184 @@ postgres15('Refresh-authenticated revocation on owned PostgreSQL 15', () => {
     // The database itself is disposable; never touch a foreign database/table.
     await Promise.all(clients.map((instance) => instance.$disconnect()));
   });
+
+  it('creates a real owned session through the local HTTPS login route', async () => {
+    const proofFile = process.env.NINA_ODONTOGRAM_PG15_PROOF_FILE!;
+    const directory = mkdtempSync(join(dirname(proofFile), 'https-login-'));
+    const tlsKey = join(directory, 'tls-key.pem');
+    const tlsCert = join(directory, 'tls-cert.pem');
+    const signingKey = join(directory, 'signing-key.pem');
+    let app: NestExpressApplication | undefined;
+    try {
+      const { startLocalApi } = await import('../../local-bootstrap');
+      execFileSync(
+        'openssl',
+        [
+          'req',
+          '-x509',
+          '-newkey',
+          'rsa:2048',
+          '-nodes',
+          '-days',
+          '1',
+          '-subj',
+          '/CN=localhost',
+          '-addext',
+          'subjectAltName=DNS:localhost',
+          '-keyout',
+          tlsKey,
+          '-out',
+          tlsCert,
+        ],
+        { stdio: 'ignore', timeout: 10000 },
+      );
+      const signing = generateKeyPairSync('rsa', { modulusLength: 2048 });
+      writeFileSync(
+        signingKey,
+        signing.privateKey.export({ type: 'pkcs8', format: 'pem' }),
+        { mode: 0o600 },
+      );
+      const username = `https_${randomBytes(8).toString('hex')}`;
+      const password = randomBytes(32).toString('base64url');
+      const owner = await db.user.create({
+        data: {
+          username,
+          passwordHash: await hashPassword(password),
+          role: 'STUDENT',
+        },
+      });
+      app = await startLocalApi(
+        {
+          NINA_TLS_CERT_FILE: tlsCert,
+          NINA_TLS_KEY_FILE: tlsKey,
+          NINA_SIGNING_KEY_FILE: signingKey,
+          NINA_AUTH_ISSUER: 'isolated-proof',
+          NINA_AUTH_AUDIENCE: 'isolated-browser',
+          NINA_AUTH_ACCESS_SECONDS: '60',
+          NINA_AUTH_REFRESH_SECONDS: '3600',
+          NINA_AUTH_JSON_MAX_BYTES: '1024',
+          NINA_AUTH_JSON_TIMEOUT_MS: '1000',
+          NINA_AUTH_ATTEMPT_WINDOW_MS: '60000',
+          NINA_AUTH_ATTEMPTS_PER_USER: '10',
+          NINA_AUTH_ATTEMPTS_GLOBAL: '100',
+          NINA_AUTH_TRACKED_USERS: '100',
+        },
+        0,
+      );
+      const address = app.getHttpServer().address() as AddressInfo;
+      expect(address.address).toBe('127.0.0.1');
+      const response = await new Promise<{
+        status: number | undefined;
+        body: string;
+        cookies: string[];
+        cache: string | undefined;
+      }>((resolveResponse, reject) => {
+        const req = request(
+          {
+            host: '127.0.0.1',
+            servername: 'localhost',
+            port: address.port,
+            path: '/auth/login',
+            method: 'POST',
+            ca: readFileSync(tlsCert),
+            headers: {
+              Origin: 'https://localhost:3001',
+              'Content-Type': 'application/json',
+              'X-Nina-Csrf-Protection': '1',
+            },
+          },
+          (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk: string) => {
+              body += chunk;
+            });
+            res.on('end', () =>
+              resolveResponse({
+                status: res.statusCode,
+                body,
+                cookies: res.headers['set-cookie'] ?? [],
+                cache: res.headers['cache-control'],
+              }),
+            );
+            res.on('error', reject);
+          },
+        );
+        req.on('error', reject);
+        req.setTimeout(10000, () =>
+          req.destroy(new Error('HTTPS proof timed out')),
+        );
+        req.end(JSON.stringify({ username, password }));
+      });
+      expect(response.status).toBe(204);
+      expect(response.body.length).toBe(0);
+      expect(response.cache).toBe('no-store');
+      expect(response.cookies.length).toBe(2);
+      const access = response.cookies.find((value) =>
+        value.startsWith('__Host-nina-access='),
+      );
+      const refresh = response.cookies.find((value) =>
+        value.startsWith('__Host-nina-refresh='),
+      );
+      expect(Boolean(access && refresh)).toBe(true);
+      for (const path of ['; Path=/', ';path=/', '; PATH=/']) {
+        const cookie = `sample=value${path}; Max-Age=60; Secure; HttpOnly; SameSite=Strict`;
+        expect(hasExpectedHostCookieAttributes(cookie, 60)).toBe(true);
+        expect(
+          hasExpectedHostCookieAttributes(withNonRootPath(cookie), 60),
+        ).toBe(false);
+      }
+      for (const cookie of response.cookies) {
+        const maxAge = cookie.startsWith('__Host-nina-access=') ? 60 : 3600;
+        expect(hasExpectedHostCookieAttributes(cookie, maxAge)).toBe(true);
+        expect(
+          hasExpectedHostCookieAttributes(
+            withNonRootPath(cookie),
+            maxAge,
+          ),
+        ).toBe(false);
+        expect(
+          hasExpectedHostCookieAttributes(
+            `${cookie}; Domain=example.invalid`,
+            maxAge,
+          ),
+        ).toBe(false);
+        expect(
+          hasExpectedHostCookieAttributes(`${cookie}; SameSite=None`, maxAge),
+        ).toBe(false);
+      }
+      const token = refresh!
+        .split(';', 1)[0]
+        .slice('__Host-nina-refresh='.length);
+      const sessions = await db.authSession.findMany({
+        where: { userId: owner.id },
+        include: { refreshTokens: true },
+      });
+      expect(sessions.length).toBe(1);
+      expect(sessions[0].expiresAt).toBeNull();
+      expect(sessions[0].refreshTokens.length).toBe(1);
+      const accessToken = access!
+        .split(';', 1)[0]
+        .slice('__Host-nina-access='.length);
+      const claims = jwt.verify(accessToken, signing.publicKey, {
+        algorithms: ['RS256'],
+        issuer: 'isolated-proof',
+        audience: 'isolated-browser',
+      });
+      expect(typeof claims).toBe('object');
+      if (typeof claims === 'string') throw new Error('Invalid access claims');
+      expect(claims.sub === owner.id).toBe(true);
+      expect(claims.sid === sessions[0].id).toBe(true);
+      expect(
+        sessions[0].refreshTokens[0].tokenHash ===
+          createHash('sha256').update(token).digest('hex'),
+      ).toBe(true);
+      expect(sessions[0].refreshTokens[0].tokenHash === token).toBe(false);
+    } finally {
+      await app?.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 30000);
 
   it.each([null, 'finite'])(
     'settles successful revocation with %s expiry',

@@ -606,7 +606,7 @@ function jestScenario(suite) {
   if (suite === 'auth-session-revocation')
     return {
       testPath: 'src/modules/auth/refresh-session-revocation.live.spec.ts',
-      expectedTests: 17,
+      expectedTests: 18,
     };
   if (suite === 'odontogram')
     return {
