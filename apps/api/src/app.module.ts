@@ -8,6 +8,7 @@ import { PrismaModule } from './prisma/prisma.module';
 import { AppointmentsModule } from './modules/appointments/appointments.module';
 import { EncountersModule } from './modules/encounters/encounters.module';
 import { OdontogramModule } from './modules/odontogram/odontogram.module';
+import { SimulatedImmunizationModule } from './modules/immunization/simulated-immunization.module';
 import { AccessBoundaryGuard } from './modules/auth/access-boundary.guard';
 
 @Module({
@@ -18,6 +19,7 @@ import { AccessBoundaryGuard } from './modules/auth/access-boundary.guard';
     AppointmentsModule,
     EncountersModule,
     OdontogramModule,
+    SimulatedImmunizationModule,
   ],
   controllers: [AppController],
   providers: [

@@ -57,19 +57,23 @@ model RefreshToken {
 // ==========================================
 
 model Patient {
-  id            String         @id @default(uuid())
-  rut           String         @unique
-  firstName     String
-  lastName      String
-  dateOfBirth   DateTime
-  familyId      String?
-  family        Family?        @relation(fields: [familyId], references: [id])
-  encounters    Encounter[]
-  prescriptions Prescription[]
-  immunizations Immunization[]
-  odontogram    Odontogram?
-  createdAt     DateTime       @default(now())
-  updatedAt     DateTime       @updatedAt
+  id                     String                  @id @default(uuid())
+  rut                    String                  @unique
+  firstName              String
+  lastName               String
+  dateOfBirth            DateTime
+  familyId               String?
+  family                 Family?                 @relation(fields: [familyId], references: [id])
+  encounters             Encounter[]
+  prescriptions          Prescription[]
+  immunizations          Immunization[]
+  isSimulated            Boolean                 @default(false)
+  simulatedImmunizations SimulatedImmunization[]
+  odontogram             Odontogram?
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+
+  @@unique([id, isSimulated])
 }
 
 model Family {
@@ -229,6 +233,17 @@ enum PrescriptionStatus {
 // ==========================================
 // Immunization Module
 // ==========================================
+
+model SimulatedImmunization {
+  id               String  @id @default(uuid())
+  patientId        String
+  patientSimulated Boolean @default(true)
+  patient          Patient @relation(fields: [patientId, patientSimulated], references: [id, isSimulated], onDelete: Restrict, onUpdate: Restrict)
+  vaccineCode      String
+  dateAdministered String
+
+  @@index([patientId])
+}
 
 model Immunization {
   id               String   @id @default(uuid())
