@@ -1271,7 +1271,7 @@ test('auth suite selects only its exact real-service proof and all migrations', 
   });
   assert.deepEqual(jestScenario('odontogram'), {
     testPath: 'src/modules/odontogram/odontogram.live.spec.ts',
-    expectedTests: 4,
+    expectedTests: 5,
   });
   assert.throws(
     () => jestScenario('pharmacy-ledger'),
