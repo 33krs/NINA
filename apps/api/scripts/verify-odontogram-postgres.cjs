@@ -611,7 +611,7 @@ function jestScenario(suite) {
   if (suite === 'odontogram')
     return {
       testPath: 'src/modules/odontogram/odontogram.live.spec.ts',
-      expectedTests: 4,
+      expectedTests: 5,
     };
   throw new Error('Unsupported Jest suite');
 }

@@ -24,6 +24,8 @@ jest.mock('@prisma/client', () => {
 import { PrismaClient } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service';
 import { OdontogramService } from './odontogram.service';
+import { SimulatedImmunizationPostgresRepository } from '../immunization/simulated-immunization-postgres';
+import { SimulatedImmunizationStore } from '../immunization/simulated-immunization-store';
 
 const RUN_ID = 'NINA_ODONTOGRAM_PG15_RUN_ID';
 const PROOF_FILE = 'NINA_ODONTOGRAM_PG15_PROOF_FILE';
@@ -381,6 +383,40 @@ postgres15(
           ])
         ).version,
       ).toBe(1);
+    });
+
+    it('isolates and persists simulated immunizations for explicitly classified patients', async () => {
+      const patientId = randomUUID();
+      const otherPatientId = randomUUID();
+      await createPatient(baselineDb, patientId);
+      await createPatient(baselineDb, otherPatientId);
+      const makeRepository = (db: PrismaClient) =>
+        new SimulatedImmunizationPostgresRepository({
+          execute: (query) => db.$executeRaw(query),
+          query: (query) => db.$queryRaw(query),
+        });
+      const repository = makeRepository(baselineDb);
+      const store = new SimulatedImmunizationStore(repository);
+      const record = {
+        patientId,
+        vaccineCode: 'training-vaccine',
+        dateAdministered: '2026-01-01',
+      };
+
+      await expect(store.create(record)).rejects.toThrow();
+      expect(await repository.markPatientSimulated(randomUUID())).toBe(false);
+      expect(await repository.markPatientSimulated(patientId)).toBe(true);
+      await store.create(record);
+      expect(await store.findByPatient(otherPatientId)).toEqual([]);
+      const freshStore = new SimulatedImmunizationStore(
+        makeRepository(client()),
+      );
+      expect(await freshStore.findByPatient(patientId)).toEqual([
+        { ...record, kind: 'simulation' },
+      ]);
+      await expect(
+        baselineDb.$executeRaw`UPDATE "Patient" SET "isSimulated" = false WHERE "id" = ${patientId}`,
+      ).rejects.toThrow();
     });
 
     it('paginates history descending with an exclusive cursor including baseline zero', async () => {
